@@ -1,0 +1,7 @@
+PING 192.0.2.42 (192.0.2.42) 56(84) bytes of data.
+ping: connect: Network is unreachable
+
+--- 192.0.2.42 ping statistics ---
+5 packets transmitted, 0 received, 100% packet loss, time 4006ms
+ping: sendmsg: Network is unreachable
+

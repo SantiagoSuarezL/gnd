@@ -1,0 +1,10 @@
+
+Pinging 10.255.255.1 with 32 bytes of data:
+Reply from 192.168.1.254: Destination host unreachable.
+Reply from 192.168.1.254: Destination host unreachable.
+Reply from 192.168.1.254: Destination host unreachable.
+Reply from 192.168.1.254: Destination host unreachable.
+Reply from 192.168.1.254: Destination host unreachable.
+
+Ping statistics for 10.255.255.1:
+    Packets: Sent = 5, Received = 0, Lost = 5 (100% loss),

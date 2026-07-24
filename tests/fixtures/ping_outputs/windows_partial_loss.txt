@@ -1,0 +1,12 @@
+
+Pinging 192.168.1.1 with 32 bytes of data:
+Reply from 192.168.1.1: bytes=32 time=2ms TTL=64
+Request timed out.
+Reply from 192.168.1.1: bytes=32 time=3ms TTL=64
+Request timed out.
+Reply from 192.168.1.1: bytes=32 time=2ms TTL=64
+
+Ping statistics for 192.168.1.1:
+    Packets: Sent = 5, Received = 3, Lost = 2 (40% loss),
+Approximate round trip times in milli-seconds:
+    Minimum = 2ms, Maximum = 3ms, Average = 2ms

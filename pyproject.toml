@@ -49,3 +49,8 @@ src = ["src", "tests"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    # Tests contra red real (implementacion Fase 2). No corren en CI offline.
+    "integration: end-to-end / red real (deselect with '-m \"not integration\"')",
+]
+addopts = "-m \"not integration\""

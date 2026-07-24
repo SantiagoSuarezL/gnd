@@ -1,0 +1,10 @@
+
+Pinging 192.0.2.42 with 32 bytes of data:
+PING: transmit failed. General failure.
+PING: transmit failed. General failure.
+PING: transmit failed. General failure.
+PING: transmit failed. General failure.
+PING: transmit failed. General failure.
+
+Ping statistics for 192.0.2.42:
+    Packets: Sent = 5, Received = 0, Lost = 5 (100% loss),
