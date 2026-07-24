@@ -258,8 +258,26 @@ class _DefaultProcessRunner:
     """Implementacion por defecto: wrap de subprocess.run."""
 
     def __call__(self, args: list[str], timeout_ms: int) -> tuple[str, str, int]:
-        # timeout en segundos; sumamos un margen sobre lo que pidio el ping.
-        total_timeout_s = max(2.0, (timeout_ms / 1000.0) + 2.0)
+        # Calculamos timeout total del subprocess con margen generoso.
+        # Windows: ping -n <count> -w <ms> usa ~1s intervalo entre pings.
+        # Total estimado = (count - 1) * 1s + timeout_ms/1000 + margen.
+        # Linux: ping -c <count> -W <s> usa intervalo 1s por defecto.
+        is_windows = platform.system() == "Windows"
+        if is_windows and len(args) >= 3 and args[0].lower() == "ping" and "-n" in args:
+            try:
+                count_idx = args.index("-n") + 1
+                count = int(args[count_idx])
+            except (ValueError, IndexError):
+                count = 4  # fallback conservador
+        else:
+            # POSIX o caso por defecto
+            count = 4
+
+        interval_s = 1.0  # intervalo por defecto entre pings
+        wait_per_ping_s = timeout_ms / 1000.0
+        estimated_total = (count - 1) * interval_s + wait_per_ping_s + 3.0
+        total_timeout_s = max(5.0, estimated_total)
+
         proc = subprocess.run(  # noqa: S603 - args controlados internamente
             args,
             capture_output=True,
