@@ -1,0 +1,51 @@
+[project]
+name = "gnd"
+version = "0.1.0"
+description = "Game Network Diagnostics — asistente de diagnóstico de red pre/en-partida para League of Legends"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "Santiago" }]
+dependencies = [
+    "pydantic>=2.0",
+    "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "black>=24.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# --- ruff: linter único (ENGINEERING_PRINCIPLES.md §6) ---
+# Reglas activas mínimas: E, F, I (imports), UP (pyupgrade 3.12), B (bugbear)
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+
+# --- black: formateo, sin custom line-length (ENGINEERING_PRINCIPLES.md §6) ---
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+src = ["src", "tests"]
+
+# --- pytest (ENGINEERING_PRINCIPLES.md §4) ---
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
