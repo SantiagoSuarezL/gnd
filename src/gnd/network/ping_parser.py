@@ -58,7 +58,8 @@ class ParsedPing:
 # --- Patrones regex ---
 # Linux: "64 bytes from 8.8.8.8: icmp_seq=1 ttl=117 time=14.2 ms"
 _LINUX_REPLY = re.compile(r"time=([0-9.]+)\s*ms", re.IGNORECASE)
-# Windows: "Reply from 8.8.8.8: bytes=32 time=12ms TTL=117"
+
+# Windows English: "Reply from 8.8.8.8: bytes=32 time=12ms TTL=117"
 _WINDOWS_REPLY = re.compile(
     r"Reply from .*:\s+bytes=\d+\s+time=([0-9.]+)\s*ms\s+TTL=\d+", re.IGNORECASE
 )
@@ -66,6 +67,13 @@ _WINDOWS_REPLY_ZERO = re.compile(
     r"Reply from .*:\s+bytes=\d+\s+time<([0-9.]+)\s*ms\s+TTL=\d+", re.IGNORECASE
 )
 
+# Windows Spanish: "Respuesta desde 127.0.0.1: bytes=32 tiempo=11ms TTL=128"
+_WINDOWS_REPLY_ES = re.compile(
+    r"Respuesta desde .*:\s+bytes=\d+\s+tiempo=([0-9.]+)\s*ms\s+TTL=\d+", re.IGNORECASE
+)
+_WINDOWS_REPLY_ZERO_ES = re.compile(
+    r"Respuesta desde .*:\s+bytes=\d+\s+tiempo<([0-9.]+)\s*ms?\s+TTL=\d+", re.IGNORECASE
+)
 # --- Estadisticas Linux ---
 _LINUX_STATS = re.compile(
     r"(\d+)\s+packets transmitted,\s+(\d+)\s+received"
@@ -76,7 +84,7 @@ _LINUX_RTT_SUMMARY = re.compile(
     r"rtt\s+min/avg/max/mdev\s*=\s*" r"([0-9.]+)/([0-9.]+)/([0-9.]+)/([0-9.]+)\s*ms"
 )
 
-# --- Estadisticas Windows ---
+# --- Estadisticas Windows English ---
 _WIN_STATS = re.compile(
     r"Packets:\s+Sent\s*=\s*(\d+),\s+Received\s*=\s*(\d+),\s+Lost\s*=\s*(\d+)"
     r"\s+\(([0-9.]+)%\s+loss\)",
@@ -84,6 +92,19 @@ _WIN_STATS = re.compile(
 )
 _WIN_RTT = re.compile(
     r"Minimum\s*=\s*([0-9]+)ms,\s+Maximum\s*=\s*([0-9]+)ms,\s+Average\s*=\s*([0-9]+)ms",
+    re.IGNORECASE,
+)
+
+# --- Estadisticas Windows Spanish ---
+# "Paquetes: enviados = 4, recibidos = 4, perdidos = 0 (0% perdidos)"
+_WIN_STATS_ES = re.compile(
+    r"Paquetes:\s+enviados\s*=\s*(\d+),\s+recibidos\s*=\s*(\d+),\s+perdidos\s*=\s*(\d+)"
+    r"\s+\(([0-9.]+)%\s+perdidos\)",
+    re.IGNORECASE,
+)
+# "Mínimo = 10ms, Máximo = 13ms, Media = 11ms"
+_WIN_RTT_ES = re.compile(
+    r"M.nimo\s*=\s*([0-9]+)ms,\s+M.ximo\s*=\s*([0-9]+)ms,\s+Media\s*=\s*([0-9]+)ms",
     re.IGNORECASE,
 )
 
@@ -119,7 +140,7 @@ def parse(output: str) -> ParsedPing:
     for line in lineiters_no_blank(lines):
         low = line.strip()
 
-        # RTTs individuales: probar ambos formatos
+        # RTTs individuales: probar ambos formatos (EN + ES)
         m = _WINDOWS_REPLY.search(low)
         if m:
             rtts.append(float(m.group(1)))
@@ -128,13 +149,30 @@ def parse(output: str) -> ParsedPing:
         if m:
             rtts.append(float(m.group(1)))
             continue
+        m = _WINDOWS_REPLY_ES.search(low)
+        if m:
+            rtts.append(float(m.group(1)))
+            continue
+        m = _WINDOWS_REPLY_ZERO_ES.search(low)
+        if m:
+            rtts.append(float(m.group(1)))
+            continue
         m = _LINUX_REPLY.search(low)
         if m:
             rtts.append(float(m.group(1)))
             continue
 
-        # Estadisticas: Windows primero (mas especifico)
+        # Estadisticas: Windows EN (English) primero
         m = _WIN_STATS.search(low)
+        if m:
+            transmitted = int(m.group(1))
+            received = int(m.group(2))
+            loss_pct = float(m.group(4))
+            summary_line = low
+            continue
+
+        # Estadisticas: Windows ES (Spanish)
+        m = _WIN_STATS_ES.search(low)
         if m:
             transmitted = int(m.group(1))
             received = int(m.group(2))
@@ -151,6 +189,7 @@ def parse(output: str) -> ParsedPing:
             continue
 
         # Errores explicitos (marcan UNREACHABLE vs TIMEOUT puro)
+        # English
         if _WIN_HOST_UNREACH.search(low) or _LINUX_HOST_UNREACH.search(low):
             error_letter = "U"
             continue
@@ -160,12 +199,26 @@ def parse(output: str) -> ParsedPing:
         if _WIN_TTL_EXPIRED.search(low):
             error_letter = "U"
             continue
+        # Spanish: "Host de destino inaccesible", "Error general"
+        if re.search(r"Host de destino inaccesible", low, re.IGNORECASE):
+            error_letter = "U"
+            continue
+        if re.search(r"Error general", low, re.IGNORECASE):
+            error_letter = "G"
+            continue
 
-        # RTT summary Windows: complementa avg/min/max si hubo replies
+        # RTT summary Windows EN
         m = _WIN_RTT.search(low)
         if m:
             summary_line = low
             continue
+
+        # RTT summary Windows ES
+        m = _WIN_RTT_ES.search(low)
+        if m:
+            summary_line = low
+            continue
+
         m = _LINUX_RTT_SUMMARY.search(low)
         if m:
             summary_line = low

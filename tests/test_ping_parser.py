@@ -176,3 +176,25 @@ def test_parsed_ping_immutable() -> None:
     p = ping_parser.parse("64 bytes from 1.1.1.1: time=10 ms")
     with pytest.raises(FrozenInstanceError):
         p.received = 5  # type: ignore[misc]
+
+
+# --- Windows Spanish ---
+
+
+def test_windows_success_spanish_parsea_rtts_y_stats() -> None:
+    out = load_fixture("windows_success_es")
+    p = ping_parser.parse(out)
+    assert p.received == 4
+    assert p.transmitted == 4
+    assert p.packet_loss_pct == 0.0
+    assert p.all_lost is False
+    assert p.rtt_ms == (1.0, 1.0, 1.0, 1.0)
+    st = p.build_stats()
+    assert st is not None
+    avg, mn, mx, jitter, samples = st
+    assert mn == 1.0
+    assert mx == 1.0
+    assert samples == 4
+    assert avg == 1.0
+    assert jitter == 0.0
+    assert p.error_letter is None
