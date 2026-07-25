@@ -69,7 +69,10 @@ def main() -> None:
         r = runner.ping(ip, name, prov, 4, 1000)
         print(f"  {name:12s} {ip} -> {r.outcome.name}  stats={r.stats}")
 
-    banner("3) RIOT PUBLIC — 104.160.136.3 (suele bloquear ICMP -> FILTERED plausible)")
+    banner(
+        "3) RIOT PUBLIC — 104.160.136.3 (IP legacy; desde LATAM suele ser"
+        " TIMEOUT real, no FILTERED)"
+    )
     r = runner.ping("104.160.136.3", "riot_public", "riot_public", 3, 1000)
     print(f"  outcome = {r.outcome.name}")
     print(f"  stats   = {r.stats}")

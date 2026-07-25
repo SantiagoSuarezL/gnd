@@ -32,7 +32,7 @@ No es necesario cargar los 5 documentos completos para cada tarea. Sugerencia de
 
 GND diferencia explícitamente entre:
 
-- La **IP pública de infraestructura Riot** (login/patch, ej. `104.160.136.3`) — fija, no representa el ping real de partida.
+- La **IP pública de infraestructura Riot** (login/patch, ej. `auth.riotgames.com` → `104.16.119.50` via Cloudflare) — dinámica por CDN, no representa el ping real de partida.
 - La **IP del servidor de partida activo** — dinámica, asignada por matchmaking, detectada en tiempo real mediante enumeración de conexiones UDP del proceso del juego (ver `TECHNICAL_SPEC.md` §2.2).
 
 Toda la arquitectura (base de datos, análisis histórico, motor de recomendación) trata estos dos como providers separados para no contaminar el baseline histórico ni las recomendaciones.

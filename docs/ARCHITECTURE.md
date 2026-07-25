@@ -81,7 +81,7 @@ Este es el elemento arquitectónico distintivo de GND frente a un ping tool gen�
 
 **Implicación de diseño:** el módulo `diagnostics/riot/` debe tener DOS sub-componentes desacoplados:
 
-1. `RiotPublicEndpointProbe` — pinguea la(s) IP(s) públicas configurables (ej. `104.160.136.3`) como proxy de "salud general de Riot".
+1. `RiotPublicEndpointProbe` — pinguea la(s) IP(s) públicas configurables (ej. `auth.riotgames.com` → `104.16.119.50` vía Cloudflare) como proxy de "salud general de Riot".
 2. `ActiveGameServerDetector` — un puerto (`Protocol`) con implementación por defecto vía enumeración de conexiones de proceso (`psutil`, filtrando UDP del proceso `League of Legends.exe`), y opcionalmente reforzado con la **Live Client Data API** (`https://127.0.0.1:2999/liveclientdata/`) para confirmar que hay partida activa y sincronizar el momento del sondeo.
 
 Estos dos componentes alimentan registros **distintos** en la base histórica (`provider = "riot_public"` vs `provider = "riot_game_server"`), para que la comparación histórica compare peras con peras.

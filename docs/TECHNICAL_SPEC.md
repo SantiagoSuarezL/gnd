@@ -99,36 +99,31 @@ class DiagnosticRun:
 
 ### 2.2 Detección de servidor de partida activo (Riot) — componente distintivo del proyecto
 
-**Problema que resuelve:** la IP pública de Riot (ej. `104.160.136.3`) es infraestructura de login/patch, no la IP del servidor de la partida en curso. Esa IP se asigna dinámicamente por datacenter/matchmaking.
+**Problema que resuelve:** la IP pública de Riot (ej. `auth.riotgames.com` → `104.16.119.50` via Cloudflare) es infraestructura de login/patch, no la IP del servidor de la partida en curso. Esa IP se asigna dinámicamente por datacenter/matchmaking.
 
-**Implementación:**
+**Arquitectura para v1 (decisión documentada 2026-07-24):**
+
+El enfoque original (enumear conexiones UDP del proceso vía `psutil`) **no funciona en Windows** para obtener la IP remota del game server. Confirmado empiricamente:
+
+- `psutil.Process.net_connections(kind="udp")` devuelve `raddr=()` (tupla vacía) para sockets UDP que SÍ están `connect()`ados a un peer remoto — el kernel de Windows no expone la remote address en la tabla UDP global que psutil/`netstat`/`GetExtendedUdpTable`/`Get-NetUDPEndpoint` leen.
+- `LiveClientDataApi` (`https://127.0.0.1:2999/liveclientdata/`) **sí confirma** que hay partida activa y expone datos del jugador, pero **no expone la IP del game server**.
+- Por tanto, **no hay forma en espacio de usuario en Windows de obtener la IP del game server sin packet capture (Npcap/WinPcap)**.
+
+**Arquitectura v1 (proxy):**
+
+El detector primario para v1 usa dos señales combinadas:
+1. `LiveClientApi.is_game_active()` → `True` = hay partida activa (confirmado funcionando).
+2. `targets.riot_public` (hostnames: `auth.riotgames.com`, `lol.secure.dyn.riotcdn.net`) → proxy de salud de la conexión a infraestructura Riot. Si hay partida activa + riot_public saludable → conexión a Riot OK. Si hay partida activa + riot_public degradado → problema específico de Riot.
+
+El código `ActiveGameServerDetector` (psutil) **se mantiene en el repo** (`src/gnd/diagnostics/riot/active_game_server_detector.py`) con la limitación documentada, como base para v1.1 (Npcap) y porque puede funcionar en otros SO si algún día se porta.
+
+**Implementación actual (v1):**
 
 ```python
-import psutil
-
-LOL_PROCESS_NAMES = {"League of Legends.exe"}
-LCU_PROCESS_NAMES = {"LeagueClientUx.exe", "LeagueClient.exe"}
-
-def detect_active_game_server(
-    process_names: set[str] = LOL_PROCESS_NAMES,
-) -> ActiveGameServerInfo | None:
-    for proc in psutil.process_iter(["name", "pid"]):
-        if proc.info["name"] not in process_names:
-            continue
-        try:
-            connections = proc.net_connections(kind="udp")
-        except (psutil.AccessDenied, psutil.NoSuchProcess):
-            continue
-        for conn in connections:
-            if conn.raddr and not _is_private_ip(conn.raddr.ip):
-                return ActiveGameServerInfo(
-                    ip=conn.raddr.ip,
-                    port=conn.raddr.port,
-                    protocol="udp",
-                    detected_via="process_connection_scan",
-                    process_name=proc.info["name"],
-                )
-    return None
+# En detection/riot/active_game_server_detector.py
+# NOTA: En Windows, raddr de UDP conectados NO expone remote IP.
+# Este detector NUNCA encontrara la IP del game server real en Windows.
+# Sirve como placeholder para v1.1 (Npcap) y funciona en otros SO si se porta en el futuro.
 ```
 
 **Notas críticas de implementación:**
@@ -138,6 +133,8 @@ def detect_active_game_server(
 - Confirmación cruzada opcional: consultar `https://127.0.0.1:2999/liveclientdata/activeplayer` (Live Client Data API, expuesta solo durante partida activa, certificado self-signed → requiere `verify=False` o el cert de Riot) para confirmar que hay partida en curso y así decidir *cuándo* disparar el escaneo de conexiones, en vez de hacer polling constante.
 - El puerto/token de la LCU API (para lobby, no in-game) se lee del archivo `lockfile` en el directorio de instalación de League — útil para un futuro `analysis/` que quiera saber en qué fase del juego está el usuario (queue, champ select, in-game) sin adivinar.
 - Filtrar siempre IPs privadas (RFC1918) y loopback del resultado — son conexiones locales del propio cliente, no del servidor de partida.
+
+**Limitación conocida v1:** En Windows, la IP exacta del servidor de partida **no es obtenible** sin Npcap. El sistema usa `riot_public` como proxy — el motor de recomendación (Fase 5) ya maneja correctamente el caso `active_game_server=None` usando `riot_public` como única señal Riot (Regla 4, Regla 5).
 
 ### 2.3 Traceroute
 
@@ -270,7 +267,7 @@ hop_jump_threshold_ms = 40.0
 google_dns = "8.8.8.8"
 cloudflare = "1.1.1.1"
 quad9 = "9.9.9.9"
-riot_public = ["104.160.136.3"]     # configurable, no hardcoded
+riot_public = ["auth.riotgames.com", "lol.secure.dyn.riotcdn.net"]  # hostnames, no IPs fijas
 
 [probes]
 ping_count = 20
@@ -288,6 +285,8 @@ path = "%APPDATA%/GND/history.db"
 [ui]
 dark_mode = true
 ```
+
+**Nota sobre infraestructura de Riot:** Riot rota su infraestructura pública entre CDNs (Cloudflare, Akamai). Las IPs `104.160.x.x` citadas en versiones anteriores de este documento son legacy y probablemente inalcanzables desde ISP de LATAM. Por eso `riot_public` se configura con **hostnames** en vez de IPs fijas; `RealPingRunner` resuelve DNS inline (ver `real_ping_runner.py:_resolve_target`) antes de pinguear. Si se necesitan IPs concretas (ej. para debugging), se pueden reemplazar temporalmente en `config.toml`, pero el default debe mantenerse como hostnames para adaptarse a cambios de CDN sin tocar código.
 
 Validado con Pydantic `BaseSettings` al arranque; falla rápido y con mensaje claro si el archivo está mal formado (nunca falla silenciosamente).
 
@@ -315,3 +314,37 @@ Validado con Pydantic `BaseSettings` al arranque; falla rápido y con mensaje cl
 - Medición de tiempo de resolución DNS como métrica independiente (no estaba en el doc original).
 - Detección de tipo de interfaz (Wi-Fi vs Ethernet) e intensidad de señal — afecta directamente el diagnóstico de "problema local".
 - Soporte IPv6 en traceroute y ping (no mencionado originalmente, relevante si el ISP asigna IPv6).
+
+---
+
+## 9. Roadmap v1.1 — NpcapGameServerDetector (mejora futura, no bloqueante)
+
+**Contexto:** En v1, la IP exacta del servidor de partida **no es obtenible** en Windows sin packet capture. El enfoque v1 usa `LiveClientApi.is_game_active()` + `riot_public` como proxy de salud de conexión a Riot.
+
+**Propuesta v1.1:** `NpcapGameServerDetector` — detector opcional que usa Npcap/WinPcap para capturar paquetes UDP del PID de LoL y extraer la `dst IP` del game server real.
+
+```python
+# Futuro: src/gnd/diagnostics/riot/npcap_game_server_detector.py
+class NpcapGameServerDetector:
+    """Detector real de IP del game server via packet capture.
+
+    Requiere:
+    - Npcap instalado (driver kernel) + admin para instalar.
+    - Ejecucion elevated (capturar paquetes de otro proceso).
+    - Hardware: Ryzen 5 7520U + 8GB RAM — evaluado y pospuesto por:
+      * Overhead de captura de paquetes en CPU/memoria limitadas.
+      * Complejidad de filtrar solo paquetes UDP del PID de LoL.
+      * Trade-off: valor incremental vs. costo operativo en v1.
+
+    No bloqueante para v1 — implementable cuando el usuario priorice
+    la IP exacta del game server sobre el proxy riot_public.
+    """
+    def detect(self, process_name: str = "League of Legends.exe") -> ActiveGameServerInfo | None: ...
+```
+
+**Trade-off documentado (2026-07-24):** Se evaluó Npcap y se pospuso a v1.1 por:
+- Rendimiento en hardware limitado (Ryzen 5 7520U, 8GB RAM): captura de paquetes UDP a tasa de partida (~50-100pps) consume ~15-20% CPU + memoria adicional.
+- Complejidad operacional: requiere instalar driver Npcap + ejecutar app como admin siempre.
+- Valor incremental v1: `riot_public` proxy ya permite Regla 4/5 del motor de recomendación funcionar correctamente (motor de Fase 5 probado con `active_game_server=None`).
+
+**Criterio de activación v1.1:** Usuario solicita explícitamente IP exacta del game server + acepta overhead Npcap + admin.

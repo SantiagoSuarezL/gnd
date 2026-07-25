@@ -5,6 +5,7 @@ No tocan red ni socket real. Inyecto un `ProcessRunner` y mockeo
 TIMEOUT del fallback (EP §4: sin red en tests unitarios).
 """
 
+import socket
 from unittest.mock import patch
 
 import pytest
@@ -191,16 +192,86 @@ def test_resultado_es_probe_result_inmutable() -> None:
 
 
 def test_build_args_linux_formato() -> None:
-    runner = RealPingRunner()
-    args = runner._build_args("8.8.8.8", 5, 1000)  # noqa: SLF001
+    with patch("gnd.network.real_ping_runner.platform.system", return_value="Linux"):
+        runner = RealPingRunner()
+        args = runner._build_args("8.8.8.8", 5, 1000)  # noqa: SLF001
     assert "ping" in args
     assert "-c" in args and "5" in args
     assert "8.8.8.8" in args
 
 
 def test_build_args_timeout_minimo_1s_linux() -> None:
-    runner = RealPingRunner()
-    # timeout_ms 100 -> max(1, 0) = 1s (no 0).
-    args = runner._build_args("1.1.1.1", 1, 100)  # noqa: SLF001
+    with patch("gnd.network.real_ping_runner.platform.system", return_value="Linux"):
+        runner = RealPingRunner()
+        # timeout_ms 100 -> max(1, 0) = 1s (no 0).
+        args = runner._build_args("1.1.1.1", 1, 100)  # noqa: SLF001
     idx = args.index("-W")
     assert args[idx + 1] == "1"
+
+
+def test_build_args_windows_formato() -> None:
+    with patch("gnd.network.real_ping_runner.platform.system", return_value="Windows"):
+        runner = RealPingRunner()
+        args = runner._build_args("8.8.8.8", 5, 1000)  # noqa: SLF001
+    assert "ping" in args
+    assert "-n" in args and "5" in args
+    assert "-w" in args and "1000" in args
+    assert "8.8.8.8" in args
+
+
+def test_build_args_windows_timeout_unidad_ms() -> None:
+    with patch("gnd.network.real_ping_runner.platform.system", return_value="Windows"):
+        runner = RealPingRunner()
+        args = runner._build_args("1.1.1.1", 1, 500)  # noqa: SLF001
+    idx = args.index("-w")
+    assert args[idx + 1] == "500"
+
+
+# --- DNS resolution ---
+
+
+def test_resolve_target_literal_ipv4_passthrough() -> None:
+    runner = RealPingRunner(process_runner=_StubProcess(load_fixture("linux_success")))
+    resolved = runner._resolve_target("8.8.8.8")
+    assert resolved == "8.8.8.8"
+
+
+def test_resolve_target_hostname_success() -> None:
+    with patch("gnd.network.real_ping_runner.socket.getaddrinfo") as mock_getaddrinfo:
+        mock_getaddrinfo.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("104.16.119.50", 0))
+        ]
+        runner = RealPingRunner(
+            process_runner=_StubProcess(load_fixture("linux_success"))
+        )
+        resolved = runner._resolve_target("auth.riotgames.com")
+        assert resolved == "104.16.119.50"
+        mock_getaddrinfo.assert_called_once_with(
+            "auth.riotgames.com", None, socket.AF_INET
+        )
+
+
+def test_resolve_target_hostname_failure_returns_none() -> None:
+    with patch("gnd.network.real_ping_runner.socket.getaddrinfo") as mock_getaddrinfo:
+        mock_getaddrinfo.side_effect = socket.gaierror("Name or service not known")
+        runner = RealPingRunner(
+            process_runner=_StubProcess(load_fixture("linux_success"))
+        )
+        resolved = runner._resolve_target("invalid.invalid.tld")
+        assert resolved is None
+
+
+def test_ping_with_hostname_resolves_and_uses_resolved_ip() -> None:
+    """End-to-end: hostname se resuelve internamente, pero target_ip
+    guarda el valor original del caller para estabilidad del baseline."""
+    with patch("gnd.network.real_ping_runner.socket.getaddrinfo") as mock_getaddrinfo:
+        mock_getaddrinfo.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("104.16.119.50", 0))
+        ]
+        runner = RealPingRunner(
+            process_runner=_StubProcess(load_fixture("linux_success"))
+        )
+        r = runner.ping("auth.riotgames.com", "auth_riot", "riot_public", 2, 1000)
+    # target_ip = hostname original (estable), no la IP resuelta
+    assert r.target_ip == "auth.riotgames.com"
+    assert r.target_name == "auth_riot"

@@ -15,6 +15,8 @@ como ProbeResult con el outcome adecuado (EP §1.2).
 
 import logging
 import platform
+import re
+import socket
 import subprocess
 from datetime import datetime
 from typing import Protocol
@@ -25,10 +27,28 @@ from gnd.network import ping_parser, tcp_syn_probe
 logger = logging.getLogger(__name__)
 
 
+# Regex para detectar si el target ya es una IPv4 (simple check).
+_IPV4_PATTERN = re.compile(
+    r"^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}"
+    r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$"
+)
+
+
+def _looks_like_ipv4(target: str) -> bool:
+    """True si `target` parece una IPv4 valida (no hostname)."""
+    return bool(_IPV4_PATTERN.match(target))
+
+
 class RealPingRunner:
     """PingRunner real via subprocess sobre `ping` nativo del OS.
 
     Detecta si esta en Windows (`ping -n -w`) o POSIX (`ping -c -W`).
+    Resuelve hostnames a IPv4 antes de pinguear (DNS resolution inline).
+    El valor ORIGINAL de `target_ip` (hostname o IP) se guarda en
+    `ProbeResult.target_ip` — la IP resuelta solo se usa para el sondeo
+    de red. Esto evita contaminar el baseline historico si el DNS de
+    un CDN (Cloudflare/Akamai) rota entre corridas.
+
     Si cached parser no logra parsear el output, degrada a TIMEOUT sin
     crashear (EP §1.2). Tras 100% ICMP loss ejecuta el fallback TCP SYN
     a puerto `fallback_port` (default 443).
@@ -57,22 +77,43 @@ class RealPingRunner:
         """Implementa `Protocol PingRunner.ping`.
 
         EP §2.L (Liskov): signature y contrato identicos al fake.
+
+        `target_ip` puede ser un hostname o IPv4. Internamente se resuelve
+        a IPv4 para el sondeo, pero `ProbeResult.target_ip` guarda el valor
+        ORIGINAL del caller (hostname). Esto evita contaminar el baseline
+        historico si el DNS de un CDN (Cloudflare/Akamai) rota de IP entre
+        corridas — el baseline agrupa por `provider` + `target_ip` estable.
+        La IP resuelta del momento queda en logs para debug.
         """
-        args = self._build_args(target_ip, count, timeout_ms)
+        # Resolucion DNS inline (hostname -> IPv4) solo para el sondeo.
+        resolved_ip = self._resolve_target(target_ip)
+        if resolved_ip is None:
+            logger.warning("DNS resolution failed target=%s -> UNREACHABLE", target_ip)
+            return self._no_icmp_result(
+                target_ip, target_name, provider, count, ProbeOutcomeKind.UNREACHABLE
+            )
+
+        # Ejecutar ping contra la IP resuelta.
+        args = self._build_args(resolved_ip, count, timeout_ms)
         try:
             stdout, stderr, returncode = self._process_runner(args, timeout_ms)
         except subprocess.TimeoutExpired:
             logger.warning(
-                "ping subprocess timeoutExpired target=%s args=%s",
+                "ping subprocess timeoutExpired target=%s (resolved=%s) args=%s",
                 target_ip,
+                resolved_ip,
                 args,
             )
             return self._no_icmp_result(
                 target_ip, target_name, provider, count, ProbeOutcomeKind.TIMEOUT
             )
         except OSError as exc:
-            # ping binary no encontrado u otro error de SO.
-            logger.exception("ping subprocess OSError target=%s: %s", target_ip, exc)
+            logger.exception(
+                "ping subprocess OSError target=%s (resolved=%s): %s",
+                target_ip,
+                resolved_ip,
+                exc,
+            )
             return self._no_icmp_result(
                 target_ip,
                 target_name,
@@ -83,13 +124,32 @@ class RealPingRunner:
 
         parsed = ping_parser.parse(stdout + "\n" + stderr)
         return self._to_probe_result(
-            target_ip,
+            target_ip,  # valor original del caller (hostname o IP)
             target_name,
             provider,
             count,
             parsed,
             returncode,
         )
+
+    def _resolve_target(self, target: str) -> str | None:
+        """Resuelve `target` (hostname o IPv4) a una IPv4.
+
+        - Si ya es IPv4 (regex simple), lo devuelve tal cual.
+        - Si es hostname, intenta `socket.getaddrinfo` con AF_INET.
+        - Devuelve None si la resolucion falla (no lanza).
+        """
+        if _looks_like_ipv4(target):
+            return target
+        try:
+            # AF_INET fuerza IPv4. getaddrinfo devuelve
+            # (family, type, proto, canonname, sockaddr).
+            infos = socket.getaddrinfo(target, None, socket.AF_INET)
+            if not infos:
+                return None
+            return infos[0][4][0]  # sockaddr[0] = IP
+        except socket.gaierror:
+            return None
 
     # --- helpers privados ---
 
@@ -289,3 +349,4 @@ class _DefaultProcessRunner:
 
 
 _default_process_runner: ProcessRunner = _DefaultProcessRunner()  # type: ignore[assignment]
+x = 1 + 2 + 3
