@@ -17,7 +17,12 @@ from gnd.models.historical_baseline import HistoricalBaseline
 
 @runtime_checkable
 class DiagnosticsRepository(Protocol):
-    """Persiste un DiagnosticRun completo (con probes y traceroutes anidados)."""
+    """Persiste un DiagnosticRun completo (con probes y traceroutes anidados).
+
+    La conexion SQLite la gestiona la implementacion (SqliteDiagnosticsRepository
+    pide una conn nueva por save_run via ``DatabaseConnectionFactory`` — Regla
+    de Oro 9.1). El caller NO pasa la conn por call.
+    """
 
     def save_run(self, run: DiagnosticRun) -> None: ...
 

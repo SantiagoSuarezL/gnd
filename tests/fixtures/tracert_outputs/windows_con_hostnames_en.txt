@@ -1,0 +1,10 @@
+
+Tracing route to dns.google [8.8.8.8] over a maximum of 30 hops:
+
+  1     1 ms     1 ms     1 ms  router.local [192.168.20.1]
+  2     8 ms     7 ms     8 ms  cgnat.isp.example [100.121.15.195]
+  3     9 ms     8 ms     9 ms  core.isp.example [172.28.110.50]
+  4    11 ms     9 ms    10 ms  142.250.164.139
+  5    11 ms    10 ms    10 ms  dns.google [8.8.8.8]
+
+Trace complete.

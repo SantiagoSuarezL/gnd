@@ -57,9 +57,38 @@ CREATE TABLE IF NOT EXISTS active_game_servers (
 
 CREATE INDEX IF NOT EXISTS idx_probe_provider_time
     ON probe_results(provider, timestamp);
+
+CREATE TABLE IF NOT EXISTS monitoring_sessions (
+    session_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    target_ip TEXT NOT NULL,
+    target_provider TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL,
+    interval_s REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mon_sessions_run
+    ON monitoring_sessions(run_id);
+
+CREATE TABLE IF NOT EXISTS monitoring_hops (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES monitoring_sessions(session_id),
+    hop_number INTEGER NOT NULL,
+    ip TEXT,
+    hostname TEXT,
+    best_ms REAL,
+    worst_ms REAL,
+    avg_ms REAL,
+    jitter_ms REAL NOT NULL,
+    loss_pct REAL NOT NULL,
+    samples INTEGER NOT NULL,
+    success_count INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mon_hops_session
+    ON monitoring_hops(session_id);
 """
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def ensure_schema(conn) -> None:

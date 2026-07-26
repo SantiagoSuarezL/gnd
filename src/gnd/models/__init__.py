@@ -10,6 +10,7 @@ from gnd.models.active_game_server import ActiveGameServerInfo
 from gnd.models.diagnostic_run import DiagnosticRun
 from gnd.models.historical_baseline import HistoricalBaseline
 from gnd.models.latency_stats import LatencyStats
+from gnd.models.monitoring import HopStats, MonitoringSample, MonitoringSession
 from gnd.models.probe_result import ProbeOutcomeKind, ProbeResult
 from gnd.models.recommendation import Recommendation
 from gnd.models.traceroute import TracerouteHop, TracerouteResult
@@ -18,7 +19,10 @@ __all__ = [
     "ActiveGameServerInfo",
     "DiagnosticRun",
     "HistoricalBaseline",
+    "HopStats",
     "LatencyStats",
+    "MonitoringSample",
+    "MonitoringSession",
     "ProbeOutcomeKind",
     "ProbeResult",
     "Recommendation",

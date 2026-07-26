@@ -1,0 +1,10 @@
+
+Tracing route to 192.0.2.1 over a maximum of 5 hops:
+
+  1     1 ms     1 ms     1 ms  192.168.20.1
+  2     *        *        *     Request timed out.
+  3     *        *        *     Request timed out.
+  4     *        *        *     Request timed out.
+  5     *        *        *     Request timed out.
+
+Trace complete.

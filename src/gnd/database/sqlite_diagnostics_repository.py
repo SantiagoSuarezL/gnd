@@ -4,6 +4,11 @@ TECHNICAL_SPEC.md §3. Solo implementa save_run() — la escritura.
 Las queries de lectura (baseline, get_by_provider, etc.) son
 responsabilidad de analysis/ (Fase 4) y se ejecutan directamente
 contra SQLite, no a traves de este repositorio.
+
+Regla de Oro 9.1 (threading SQLite): en lugar de recibir una
+``sqlite3.Connection`` compartida (prohibida cross-thread por sqlite3),
+recibe una ``DatabaseConnectionFactory`` y pide una conn nueva por
+``save_run``. Cada conn vive y muere dentro del hilo que la pidio.
 """
 
 import json
@@ -11,6 +16,7 @@ import sqlite3
 from typing import Any
 
 from gnd.database.schema import ensure_schema
+from gnd.domain.ports.database import DatabaseConnectionFactory
 from gnd.models.diagnostic_run import DiagnosticRun
 from gnd.models.traceroute import TracerouteHop
 
@@ -20,16 +26,48 @@ class SqliteDiagnosticsRepository:
 
     Unica responsabilidad: guardar corridas de diagnostico.
     No expone metodos de lectura — analysis/ (Fase 4) accede
-    directamente a la conexion SQLite para las queries historicas.
+    directamente a una conexion SQLite (pedida via la misma factory)
+    para las queries historicas.
+
+    La factory se prove por constructor (DI). ``save_run`` pide una
+    conn nueva, ejecuta los INSERTs y la cierra. Multiples calls =
+    multiples conns (todas del mismo hilo — no hay bug cross-thread).
     """
 
-    def __init__(self, connection: sqlite3.Connection) -> None:
-        self._conn = connection
-        self._conn.row_factory = sqlite3.Row
-        ensure_schema(self._conn)
+    def __init__(self, db_factory: DatabaseConnectionFactory) -> None:
+        """
+        Args:
+            db_factory: provee ``sqlite3.Connection`` por call. En un
+                hilo worker (UI controller) cada ``save_run`` pide una
+                nueva conn de la factory; esa conn vive y muere en el
+                mismo hilo. Nunca compartirla entre hilos (Regla de Oro 9.1).
+
+        Pre-warm: pide una conn al construir y deja que el GC la cierre.
+        ``ensure_schema`` usa ``CREATE TABLE IF NOT EXISTS`` para que un
+        primer arranque cree las tablas antes de cualquier save_run o
+        compute_baseline. Idempotente.
+        """
+        self._factory = db_factory
+        ensure_schema(db_factory.create_connection())
 
     def save_run(self, run: DiagnosticRun) -> None:
-        self._conn.execute(
+        # Regla de Oro 9.1: pedir conn nueva del factory. No se cierra
+        # explicitamente (sqlite3.Connection cierra la DB file handle al
+        # GC). En tests FakeDatabaseConnectionFactory puede devolver una
+        # conn compartida — si la cerrasemos aqui, los asserts posteriores
+        # del test fallarian ("Cannot operate on a closed database").
+        # En prod, SqliteConnectionFactory crea conn nueva por call y el
+        # GC libera el handle sin leak.
+        conn = self._factory.create_connection()
+        try:
+            self._save_run_in_conn(run, conn)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    def _save_run_in_conn(self, run: DiagnosticRun, conn: sqlite3.Connection) -> None:
+        conn.execute(
             """INSERT OR REPLACE INTO diagnostic_runs
                (run_id, started_at, finished_at,
                 recommendation_verdict, recommendation_headline,
@@ -54,7 +92,7 @@ class SqliteDiagnosticsRepository:
              samples, timestamp)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
         for p in run.probes:
-            self._conn.execute(
+            conn.execute(
                 probe_sql,
                 (
                     run.run_id,
@@ -76,7 +114,7 @@ class SqliteDiagnosticsRepository:
             (run_id, target_provider, culprit_hop_index, hops_json)
             VALUES (?, ?, ?, ?)"""
         for t in run.traceroutes:
-            self._conn.execute(
+            conn.execute(
                 traceroute_sql,
                 (
                     run.run_id,
@@ -88,7 +126,7 @@ class SqliteDiagnosticsRepository:
 
         if run.active_game_server is not None:
             ags = run.active_game_server
-            self._conn.execute(
+            conn.execute(
                 """INSERT INTO active_game_servers
                    (run_id, ip, port, protocol, detected_via, process_name)
                    VALUES (?, ?, ?, ?, ?, ?)""",
@@ -102,8 +140,6 @@ class SqliteDiagnosticsRepository:
                 ),
             )
 
-        self._conn.commit()
-
 
 def _hop_to_dict(hop: TracerouteHop) -> dict[str, Any]:
     return {
@@ -113,13 +149,3 @@ def _hop_to_dict(hop: TracerouteHop) -> dict[str, Any]:
         "rtt_ms": hop.rtt_ms,
         "responded": hop.responded,
     }
-
-
-def _dict_to_hop(d: dict[str, Any]) -> TracerouteHop:
-    return TracerouteHop(
-        hop_number=d["hop_number"],
-        ip=d["ip"],
-        hostname=d["hostname"],
-        rtt_ms=d["rtt_ms"],
-        responded=d["responded"],
-    )

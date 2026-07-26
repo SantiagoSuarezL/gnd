@@ -87,11 +87,52 @@ def _make_run(
     )
 
 
-def _repo() -> SqliteDiagnosticsRepository:
+def _repo_and_conn() -> tuple[SqliteDiagnosticsRepository, "object"]:
+    """Returns (repo, shared_conn) — la conn vive en FakeDatabaseConnectionFactory.
+
+    Tras Fase 9 fix (Regla de Oro 9.1), el repo pide conn por call via
+    factory, no la guarda. La verificacion de los tests se hace sobre la
+    conn compartida (envuelta en factory, single-thread, check_same_thread
+    default True). Ejemplo:
+
+        repo, conn = _repo_and_conn()
+        repo.save_run(run)
+        row = conn.execute("SELECT ...").fetchone()
+
+    Este es el patron recomendado. El helper legacy ``_repo()`` abajo
+    esta para no romper tests que ya usaban ``repo._conn``.
+    """
     import sqlite3
 
+    from gnd.domain.fakes import FakeDatabaseConnectionFactory
+
     conn = sqlite3.connect(":memory:")
-    return SqliteDiagnosticsRepository(conn)
+    conn.row_factory = sqlite3.Row
+    factory = FakeDatabaseConnectionFactory(conn)
+    return SqliteDiagnosticsRepository(factory), conn
+
+
+class _RepoView:
+    """Compat legacy: expone ``._conn`` para tests pre-Fase-9.
+
+    Tras el fix threading (Regla de Oro 9.1) el repo ya no guarda `_conn`
+    (pide una nueva por call). Para no reescribir todos los asserts de
+    los tests existentes, este wrapper sigue exponiendo `_conn` que
+    apunta a la conn compartida del factory. Los tests nuevos deben
+    preferir ``_repo_and_conn()`` (mas explicito).
+    """
+
+    def __init__(self, repo: SqliteDiagnosticsRepository, conn) -> None:
+        self._repo = repo
+        self._conn = conn
+
+    def save_run(self, run: DiagnosticRun) -> None:
+        self._repo.save_run(run)
+
+
+def _repo() -> "_RepoView":
+    repo, conn = _repo_and_conn()
+    return _RepoView(repo, conn)
 
 
 def test_save_run_inserts_diagnostic_run_row() -> None:

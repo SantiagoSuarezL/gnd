@@ -1,16 +1,16 @@
-"""Implementacion real de `Protocol PingRunner` (ARCHITECTURE.md §2).
+﻿"""Implementacion real de `Protocol PingRunner` (ARCHITECTURE.md Â§2).
 
 Ejecuta el `ping` nativo del OS via `subprocess` y parsea el output con
 `network/ping_parser`. Si ICMP reporta 100% packet loss, aplica fallback
 TCP SYN (`network/tcp_syn_probe`) para distinguir:
 
-- FILTERED  (TECHNICAL_SPEC.md §7): ICMP bloqueado pero TCP 443 responde.
+- FILTERED  (TECHNICAL_SPEC.md Â§7): ICMP bloqueado pero TCP 443 responde.
             Se excluye del score/baseline, no penaliza.
 - UNREACHABLE: ICMP blocked + TCP unreachable (sin ruta) o general failure.
 - TIMEOUT:  ICMP blocked + TCP timeout (host probablemente caido).
 
 No lanza excepciones hacia el caller: toda condicion de red se devuelve
-como ProbeResult con el outcome adecuado (EP §1.2).
+como ProbeResult con el outcome adecuado (EP Â§1.2).
 """
 
 import logging
@@ -45,12 +45,12 @@ class RealPingRunner:
     Detecta si esta en Windows (`ping -n -w`) o POSIX (`ping -c -W`).
     Resuelve hostnames a IPv4 antes de pinguear (DNS resolution inline).
     El valor ORIGINAL de `target_ip` (hostname o IP) se guarda en
-    `ProbeResult.target_ip` — la IP resuelta solo se usa para el sondeo
+    `ProbeResult.target_ip` â€” la IP resuelta solo se usa para el sondeo
     de red. Esto evita contaminar el baseline historico si el DNS de
     un CDN (Cloudflare/Akamai) rota entre corridas.
 
     Si cached parser no logra parsear el output, degrada a TIMEOUT sin
-    crashear (EP §1.2). Tras 100% ICMP loss ejecuta el fallback TCP SYN
+    crashear (EP Â§1.2). Tras 100% ICMP loss ejecuta el fallback TCP SYN
     a puerto `fallback_port` (default 443).
     """
 
@@ -76,13 +76,13 @@ class RealPingRunner:
     ) -> ProbeResult:
         """Implementa `Protocol PingRunner.ping`.
 
-        EP §2.L (Liskov): signature y contrato identicos al fake.
+        EP Â§2.L (Liskov): signature y contrato identicos al fake.
 
         `target_ip` puede ser un hostname o IPv4. Internamente se resuelve
         a IPv4 para el sondeo, pero `ProbeResult.target_ip` guarda el valor
         ORIGINAL del caller (hostname). Esto evita contaminar el baseline
         historico si el DNS de un CDN (Cloudflare/Akamai) rota de IP entre
-        corridas — el baseline agrupa por `provider` + `target_ip` estable.
+        corridas â€” el baseline agrupa por `provider` + `target_ip` estable.
         La IP resuelta del momento queda en logs para debug.
         """
         # Resolucion DNS inline (hostname -> IPv4) solo para el sondeo.
@@ -349,3 +349,4 @@ class _DefaultProcessRunner:
 
 
 _default_process_runner: ProcessRunner = _DefaultProcessRunner()  # type: ignore[assignment]
+x = 1 + 2 + 3

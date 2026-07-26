@@ -1,0 +1,13 @@
+
+Tracing route to 203.0.113.42 over a maximum of 8 hops:
+
+  1     1 ms     1 ms     1 ms  192.168.20.1
+  2     7 ms     7 ms     7 ms  100.121.15.195
+  3     9 ms    10 ms     8 ms  172.28.110.50
+  4    11 ms     9 ms     9 ms  62.115.41.29
+  5     8 ms     7 ms     8 ms  62.115.41.30
+  6    10 ms     9 ms     9 ms  62.115.41.31
+  7    90 ms    92 ms    88 ms  172.16.0.1
+  8   135 ms   132 ms   131 ms  203.0.113.42
+
+Trace complete.

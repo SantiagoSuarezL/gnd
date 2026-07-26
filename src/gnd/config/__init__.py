@@ -40,7 +40,7 @@ class Targets(BaseModel):
 
 
 class Probes(BaseModel):
-    ping_count: int = 20
+    ping_count: int = 8
     timeout_ms: int = 1000
     traceroute_max_hops: int = 30
 
@@ -64,10 +64,6 @@ class Database(BaseModel):
     path: str = "%APPDATA%/GND/history.db"
 
 
-class Ui(BaseModel):
-    dark_mode: bool = True
-
-
 # ---------------------------------------------------------------------------
 # Settings raiz
 # ---------------------------------------------------------------------------
@@ -79,7 +75,6 @@ class GndSettings(BaseSettings):
     game_detection: GameDetection = GameDetection()
     thresholds: Thresholds = Thresholds()
     database: Database = Database()
-    ui: Ui = Ui()
 
     model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(
         env_prefix="GND_",
@@ -97,10 +92,6 @@ class GndSettings(BaseSettings):
             return cls(_env_file=str(candidate))
         return cls()
 
-    def validate_now(self) -> None:
-        """Fallo rapido: lanza ValidationError si algo esta mal."""
-        _ = self.model_dump()
-
 
 # Singleton de settings (cargado una vez al arrancar, usado globalmente).
 _settings: GndSettings | None = None
@@ -110,10 +101,4 @@ def get_settings() -> GndSettings:
     global _settings
     if _settings is None:
         _settings = GndSettings.load()
-    return _settings
-
-
-def reload_settings(path: str | Path | None = None) -> GndSettings:
-    global _settings
-    _settings = GndSettings.load(path)
     return _settings

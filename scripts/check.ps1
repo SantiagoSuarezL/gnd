@@ -1,6 +1,8 @@
 # CI local — Fase 0 (IMPLEMENTATION_PLAN.md)
-# Ejecutar desde la raiz del proyecto con el entorno virtual (.venv) activado.
-# Corre ruff check, black --check y pytest en un solo comando.
+# Ejecutar desde la raiz del proyecto con el entorno virtual (.venv) activado:
+#     .\.venv\Scripts\Activate.ps1
+#     .\scripts\check.ps1
+# Corre ruff, vulture, black y pytest en un solo comando.
 # Detiene la ejecucion en el primer error (via exit codes explicitos).
 #
 # Problema resuelto: PowerShell 5.1 convierte stderr de nativos
@@ -8,6 +10,11 @@
 # RemoteException, contaminando el output aunque LASTEXITCODE=0. Solucion:
 # ejecutamos cada tool via `cmd /c <tool> 2>&1`, que produce un texto unificado
 # y sin RemoteException (cmd captura el stderr nativo como string).
+#
+# Invocamos via `python -m <tool>` para robustez: funciona tanto si los
+# entry points del .venv estan en el PATH (venv activado) como si python
+# resuelve al del venv por el selector por defecto. Si ruff no se
+# encuentra, recordatorio: hay que activarlo (`.\.venv\Scripts\Activate.ps1`).
 
 $ErrorActionPreference = "Continue"
 
@@ -24,13 +31,22 @@ function Check-Step {
     return $LASTEXITCODE
 }
 
-$rc = Check-Step "ruff check" "ruff check ."
+$rc = Check-Step "ruff check" "python -m ruff check ."
 if ($rc -ne 0) { Write-Host "FAIL: ruff rc=$rc" -ForegroundColor Red; exit $rc }
 
-$rc = Check-Step "black --check" "black --check ."
+$rc = Check-Step "vulture (codigo muerto)" "python -m vulture"
+# vulture devuelve exit code 1 si encuentra codigo muerto; rc=0 = limpio.
+if ($rc -ne 0) {
+    Write-Host "FAIL: vulture rc=$rc (codigo muerto detectado arriba). " `
+        "Resolver antes de commit (incidente Fase 6: x=1+2+3 sobrev. 8 fases)." `
+        -ForegroundColor Red
+    exit $rc
+}
+
+$rc = Check-Step "black --check" "python -m black --check ."
 if ($rc -ne 0) { Write-Host "FAIL: black rc=$rc" -ForegroundColor Red; exit $rc }
 
-$rc = Check-Step "pytest" "python -m pytest"
+$rc = Check-Step "pytest" "python -m pytest -q"
 if ($rc -ne 0) { Write-Host "FAIL: pytest rc=$rc" -ForegroundColor Red; exit $rc }
 
-Write-Host "OK: ruff, black y pytest pasaron sin errores." -ForegroundColor Green
+Write-Host "OK: ruff, vulture, black y pytest pasaron sin errores." -ForegroundColor Green

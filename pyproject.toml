@@ -17,6 +17,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
     "black>=24.0",
+    "vulture>=2.16",
 ]
 
 [build-system]
@@ -55,3 +56,52 @@ markers = [
     "integration: end-to-end / red real (deselect with '-m \"not integration\"')",
 ]
 addopts = "-m \"not integration\""
+
+# --- vulture: detector de codigo muerto (agregado como guardia extra
+# despues del incidente Fase 6 donde x = 1 + 2 + 3 sobrevivio 3 fases
+# de ruff+black+pytest sin ser detectado; ruff F841 solo aplica a locales
+# dentro de funciones, no a top-level module attrs).
+#
+# min_confidence=60 para CATCH globales al top-level (como x = 1 + 2 + 3,
+# que vulture reporta a 60% con confianza). False positives conocidos
+# (Protocols, fakes, side-effects sqlite3) se whitelistean abajo.
+[tool.vulture]
+min_confidence = 60
+paths = ["src/gnd"]
+exclude = ["src/gnd/__pycache__"]
+ignore_names = [
+    # --- domain/ports/* (Protocols declarativos; vulture no los ve como
+    # contratos pero los implementadores los cumplen por DI) ---
+    "get_latency_baseline",  # DiagnosticsRepository Protocol
+    "evaluate",  # RecommendationEngine Protocol
+    "save_run",  # DiagnosticsRepository.save_run (Implementaciones de Protocol)
+    "save",  # FakeDiagnosticsRepository.save (api de fake usada en tests)
+    "get_all",  # FakeDiagnosticsRepository.get_all
+    "get_by_provider",  # FakeDiagnosticsRepository.get_by_provider
+    # --- domain/fakes/*: APIs publicas de fakes, llamadas desde tests/;
+    # vulture no escanea tests/ por defecto ---
+    "set_result",
+    "set_default_result",
+    "set_session_for_run_id",
+    "set_default_session",
+    # --- protocols de RouteMonitor ---
+    "monitor",
+    "save_session",
+    "get_sessions_by_run",
+    # --- live_client_api.is_game_active(): llamada en
+    # tests/test_live_client_api.py (5 veces) y scripts/verify_phase6 ---
+    "is_game_active",
+    # --- ping_parser.all_lost es property usada en
+    # tests/test_ping_parser.py (8 referencias) ---
+    "all_lost",
+    # --- sqlite3 Connection.row_factory es configurado por side-effect:
+    # `_conn.row_factory = sqlite3.Row` no es leido como variable, por
+    # eso vulture lo marca. El codigo es legitimo (configura el cursor). ---
+    "row_factory",
+    # --- config/__init__.py: campos Pydantic que no se leen en runtime
+    # todavia (live en config.toml para Fase 12) ---
+    "lcu_process_names",
+    "poll_interval_seconds",
+    "baseline_deviation_factor",
+    "model_config",
+]

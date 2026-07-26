@@ -1,0 +1,13 @@
+
+Tracing route to the.example.com [192.0.2.50] over a maximum of 8 hops:
+
+  1     1 ms     1 ms     1 ms  192.168.20.1
+  2     7 ms     7 ms     7 ms  100.121.15.195
+  3     8 ms     7 ms     8 ms  172.28.110.50
+  4    80 ms    81 ms    79 ms  62.115.41.29
+  5     9 ms     8 ms     9 ms  62.115.41.30
+  6    10 ms     9 ms     9 ms  62.115.41.31
+  7    11 ms    10 ms    10 ms  62.115.41.32
+  8    11 ms    10 ms    10 ms  192.0.2.50
+
+Trace complete.
