@@ -20,9 +20,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from gnd.analysis.baseline import is_anomaly
 from gnd.models.historical_baseline import HistoricalBaseline
 from gnd.models.probe_result import ProbeOutcomeKind, ProbeResult
 from gnd.models.recommendation import Recommendation
+
+# Providers Internet (no Riot) cuyas anomalías de baseline deben reflejarse
+# en el veredicto. Riot lo maneja Regla 5 aparte (PRD §5.5 lo pide literal).
+# Orden establecido para que la explicación liste Google primero, etc.
+_INTERNET_BASELINE_PROVIDERS: tuple[str, ...] = (
+    "local",
+    "google",
+    "cloudflare",
+    "quad9",
+)
 
 # ── Resultado interno de una regla ─────────────────────────────────────
 
@@ -373,6 +384,82 @@ def _constraint7_jitter(
     return None
 
 
+def _constraint8_internet_latency_anomalies(
+    probes: list[ProbeResult],
+    baselines: dict[str, HistoricalBaseline],
+) -> tuple[str, list[str], str | None] | None:
+    """Restriccion 8: anomalías de baseline en providers Internet (no Riot).
+
+    Este es el fix al bug central de Fase 9: el sistema detectaba anomalías
+    reales en Historical Comparison (Google/Quad9 > avg + 2*stddev) pero el
+    motor de recomendación las ignoraba porque las reglas 1-5 solo evalúan
+    "degradado en absoluto" (no SUCCESS pero sin respuesta) o Riot >2x.
+    Ninguna regla consultaba `is_anomaly` para Google/Cloudflare/Quad9/local.
+
+    Regla (TECHNICAL_SPEC.md §4.1 + §5): si la latencia actual de un provider
+    Internet es anómala respecto a su baseline histórico (actual > avg +
+    DEVIATION_FACTOR * stddev), se emite una línea de explicación concreta
+    por cada anomalía y se degrada el veredicto mínimo a 'playable'.
+
+    Por qué 'playable' y no 'not_recommended_ranked': una anomalía de
+    latencia vs baseline es una desviación estadística, no una falla
+    confirmada (como packet loss). El usuario debe saberlo, y la decisión
+    de no jugar ranked depende de la magnitud — Regla 5 (Riot >2x baseline)
+    sí degrada a 'not_recommended_ranked' porque afecta directamente el
+    ping competitivo; una desviación estadística en Google/Quad9 es
+    informativa, no bloqueante.
+
+    Returns:
+        Tuple (headline, detail_lines, suggested_responsible) si hay anomalías.
+        `suggested_responsible` es None si no aplica (la regla 1-5 ya puso
+        un responsable más específico). Si solo anomalías dispararon el
+        veredicto, propone 'local' si gateway está anómalo, si no 'isp'.
+    """
+    found: list[tuple[str, float, float]] = []  # (provider, actual, avg)
+    for provider in _INTERNET_BASELINE_PROVIDERS:
+        probe = _get_probe(probes, provider)
+        outcome_ok = probe is not None and probe.stats is not None
+        outcome_ok = outcome_ok and probe.outcome == ProbeOutcomeKind.SUCCESS
+        if not outcome_ok:
+            continue
+        baseline = baselines.get(provider)
+        if baseline is None or baseline.sample_count == 0:
+            continue
+        if is_anomaly(probe.stats.avg_ms, baseline):
+            found.append((provider, probe.stats.avg_ms, baseline.avg_ms))
+
+    if not found:
+        return None
+
+    # Líneas explicativas: una por cada anomalía, con su delta concreto.
+    detail_lines: list[str] = []
+    for provider, actual, avg in found:
+        delta = actual - avg
+        detail_lines.append(
+            f"{provider}: actual={actual:.1f}ms vs baseline={avg:.1f}ms "
+            f"(+{delta:.1f}ms — anomalía estadística detectada vs tu histórico)."
+        )
+
+    headline = (
+        f"Se detectaron {len(found)} anomalía(s) de latencia respecto "
+        f"al baseline histórico en providers de Internet."
+    )
+    # Heuristic de responsable solo si las reglas 1-5 no matchearon.
+    # Si 'local' es uno de los anómalos → responsable tiende a ser local
+    # (la red/gateway arrastra todo). Si solo Internet externo → isp
+    # o tránsito internacional, no es Riot ni tu red local directly.
+    anomalous_providers = {p[0] for p in found}
+    if "local" in anomalous_providers:
+        suggested = "local"
+    else:
+        suggested = "isp"
+    # Bucket de explicación: una línea de headline + una línea por anomalía.
+    # Devolvemos headline en primer elemento y detalles en lista aparte para
+    # que el orquestador las append una a una (manteniendo invariant §1.3:
+    # cada línea del explanation es un hecho concreto, no una caja negra).
+    return headline, detail_lines, suggested
+
+
 # ── Veredictos por defecto ─────────────────────────────────────────────
 
 _VERDICT_SAFE = "safe_to_play"
@@ -464,6 +551,36 @@ def evaluate_recommendation(
     if c7 is not None:
         explanation.append(c7[0])
         verdict = _worse_verdict(verdict, _VERDICT_PLAYABLE)
+
+    # Constraint 8: anomalias de baseline en providers Internet (no Riot).
+    # Fix Fase 9: Historical Comparison detectaba anomalías reales (Google/
+    # Quad9 > avg + 2*stddev) pero el motor nunca las mencionaba en el
+    # veredicto, rompiendo el principio "never guess, always explain why".
+    # Riot lo cubre Regla 5 (§5.5) aparte con threshold 2x (no k*stddev).
+    c8 = _constraint8_internet_latency_anomalies(probes, bl)
+    if c8 is not None:
+        # Caso especial: si el veredicto actual es el default "safe_to_play"
+        # (i.e. las reglas 1-5 no matchearon), las lineas default del
+        # explanation ("Todos normales / Es seguro jugar ranked") son
+        # CONTRADICTORIAS con el hecho de que detectamos anomalias. Las
+        # descartamos en este sub-caso para no engañar al usuario con un
+        # mensaje auto-contradictorio. En cualquier otro caso (constraint 8
+        # refuerza un veredicto ya degradado por 1-5 o 6-7), las lineas
+        # previas ya son coherentes y se mantienen.
+        if verdict == _VERDICT_SAFE:
+            explanation = []
+        explanation.append(c8[0])
+        explanation.extend(c8[1])
+        # Degradar mínimo a 'playable' — anomalía estadística es informativa,
+        # no bloqueante. NOTA: si otra regla ya puso peor veredicto, esto no
+        # lo mejora (worse_verdict retiene el más severo).
+        verdict = _worse_verdict(verdict, _VERDICT_PLAYABLE)
+        # responsible_component: si ya está seteado por una regla más
+        # prioritaria (local/isp/riot/...), respetarlo. Solo aplicamos el
+        # sugerido por constraint 8 si el default era 'unknown' (las reglas
+        # 1-5 no matchearon y solo anomalías de baseline dispararon).
+        if responsible == "unknown" and c8[2] is not None:
+            responsible = c8[2]
 
     # ── Transparencia: si no hay game server real, avisar que usamos proxy
     if not active_game_server:

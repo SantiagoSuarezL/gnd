@@ -710,3 +710,141 @@ def test_rule5_via_evaluate_recommendation() -> None:
     assert rec.verdict == "not_recommended_ranked"
     assert any("126" in e for e in rec.explanation)
     assert any("61" in e for e in rec.explanation)
+
+
+# ── Tests: Constraint 8 — Internet baseline anomalies (Fase 9 fix) ───────
+
+
+def test_constraint8_google_quad9_anomaly_degrades_safe_to_playable() -> None:
+    """Anomalías en Google+Quad9 vs baseline → safe_to_play degradado a playable.
+
+    Este es el test del bug central de Fase 9: antes del fix, el motor
+    devolvia safe_to_play aunque Google/Quad9 estuvieran anómalos vs
+    baseline. Constraint 8 detecta la anomalía (avg + 2*stddev), emite
+    explicación concreta, y degrada a playable.
+    """
+    probes = [
+        _probe("local", avg_ms=5.0),  # local sano (baseline 5.0)
+        _probe(
+            "google", avg_ms=18.8
+        ),  # baseline 13.3, stddev 0.5 -> threshold 14.3, 18.8 > 14.3 = anomalia
+        _probe("cloudflare", avg_ms=12.0),  # sano
+        _probe(
+            "quad9", avg_ms=17.8
+        ),  # baseline 12.6, stddev 0.5 -> threshold 13.6, 17.8 > 13.6 = anomalia
+        _probe("riot_public", avg_ms=20.0),  # sano
+    ]
+    baselines = {
+        "local": HistoricalBaseline("local", 30, 5.0, 1.0, 30),
+        "google": HistoricalBaseline("google", 30, 13.3, 0.5, 30),
+        "cloudflare": HistoricalBaseline("cloudflare", 30, 12.0, 1.0, 30),
+        "quad9": HistoricalBaseline("quad9", 30, 12.6, 0.5, 30),
+        "riot_public": HistoricalBaseline("riot_public", 30, 20.0, 2.0, 30),
+    }
+    rec = evaluate_recommendation(probes, baselines=baselines, **DEFAULTS)
+
+    # Veredicto degradado
+    assert rec.verdict == "playable", f"verdict={rec.verdict}, expected playable"
+    # Responsable: isp (anomalias solo en Internet externo, sin local)
+    assert rec.responsible_component == "isp"
+    # Explicacion menciona las 2 anomalías concretas
+    assert any(
+        "google" in e and "18.8" in e for e in rec.explanation
+    ), f"google anomaly no en explanation: {rec.explanation}"
+    assert any(
+        "quad9" in e and "17.8" in e for e in rec.explanation
+    ), f"quad9 anomaly no en explanation: {rec.explanation}"
+    # NO dice "Todos normales" / "Es seguro jugar"
+    assert not any(
+        "normales" in e.lower() for e in rec.explanation
+    ), "explicacion contradictoria: 'normales' + anomalia"
+    assert not any("seguro jugar" in e.lower() for e in rec.explanation)
+
+
+def test_constraint8_with_local_anomaly_responsible_local() -> None:
+    """Anomalia en local + Internet -> responsable = local (heuristic)."""
+    probes = [
+        _probe(
+            "local", avg_ms=15.0
+        ),  # baseline 5.0, stddev 1.0 -> threshold 7.0, 15.0 > 7.0 = anomalia
+        _probe("google", avg_ms=18.8),  # anomalia
+    ]
+    baselines = {
+        "local": HistoricalBaseline("local", 30, 5.0, 1.0, 30),
+        "google": HistoricalBaseline("google", 30, 13.3, 0.5, 30),
+    }
+    rec = evaluate_recommendation(probes, baselines=baselines, **DEFAULTS)
+    assert rec.verdict == "playable"
+    assert rec.responsible_component == "local"  # heuristic: local anomalo domina
+
+
+def test_constraint8_no_baseline_no_effect() -> None:
+    """Sin baseline para un provider -> constraint 8 no se aplica a ese provider."""
+    probes = [
+        _probe("google", avg_ms=100.0),  # muy alto pero sin baseline
+    ]
+    baselines = {}  # sin baseline
+    rec = evaluate_recommendation(probes, baselines=baselines, **DEFAULTS)
+    # Sin baseline, constraint 8 no puede evaluar anomalía -> safe_to_play
+    assert rec.verdict == "safe_to_play"
+
+
+def test_constraint8_sample_count_zero_no_effect() -> None:
+    """Baseline con sample_count=0 -> constraint 8 no se aplica."""
+    probes = [_probe("google", avg_ms=100.0)]
+    baselines = {"google": HistoricalBaseline("google", 30, 0.0, 0.0, 0)}
+    rec = evaluate_recommendation(probes, baselines=baselines, **DEFAULTS)
+    assert rec.verdict == "safe_to_play"
+
+
+def test_constraint8_no_probe_no_effect() -> None:
+    """Provider sin probe -> constraint 8 ignora ese provider."""
+    probes = [_probe("local", avg_ms=5.0)]  # solo local
+    baselines = {
+        "local": HistoricalBaseline("local", 30, 5.0, 1.0, 30),
+        "google": HistoricalBaseline(
+            "google", 30, 13.3, 0.5, 30
+        ),  # baseline existe pero NO hay probe
+    }
+    rec = evaluate_recommendation(probes, baselines=baselines, **DEFAULTS)
+    # Google no tiene probe, no puede ser anomalía -> safe_to_play
+    assert rec.verdict == "safe_to_play"
+
+
+def test_constraint8_failsafe_no_ghost_text_when_rules_match() -> None:
+    """Si reglas 1-5 matchean, constraint 8 no borra sus explicaciones."""
+    # GW con packet loss critical -> rule 1 dispara (veredicto serious_issue)
+    probes = [
+        _probe("local", avg_ms=5.0, packet_loss=5.0),  # rule 1
+        _probe("google", avg_ms=18.8),  # anomalia baseline
+    ]
+    baselines = {
+        "local": HistoricalBaseline("local", 30, 5.0, 1.0, 30),
+        "google": HistoricalBaseline("google", 30, 13.3, 0.5, 30),
+    }
+    rec = evaluate_recommendation(probes, baselines=baselines, **DEFAULTS)
+    assert rec.verdict == "serious_issue"
+    # La explicación de rule 1 DEBE seguir ahi
+    assert any("Gateway local" in e for e in rec.explanation)
+    # Y constraint 8 tambien añade su linea
+    assert any("anomalía" in e or "anomalia" in e for e in rec.explanation)
+
+
+def test_constraint8_no_safe_to_play_ghost_text() -> None:
+    """Verifica que no quede 'normales' + anomalia cuando constraint 8 degrada."""
+    probes = [
+        _probe("local", avg_ms=5.0),
+        _probe("google", avg_ms=18.8),  # anomalia
+        _probe("quad9", avg_ms=17.8),  # anomalia
+    ]
+    baselines = {
+        "local": HistoricalBaseline("local", 30, 5.0, 1.0, 30),
+        "google": HistoricalBaseline("google", 30, 13.3, 0.5, 30),
+        "quad9": HistoricalBaseline("quad9", 30, 12.6, 0.5, 30),
+    }
+    rec = evaluate_recommendation(probes, baselines=baselines, **DEFAULTS)
+    assert rec.verdict == "playable"
+    # Explicacion NO debe contener el texto ghost "Todos los diagnosticos son normales"
+    full = " ".join(rec.explanation).lower()
+    assert "todos los diagnosticos son normales" not in full
+    assert "es seguro jugar ranked" not in full
