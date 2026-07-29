@@ -24,4 +24,6 @@ class TracerouteRunner(Protocol):
         target_provider: str,
         max_hops: int,
         timeout_ms: int,
+        *,
+        family: str = "ipv4",
     ) -> TracerouteResult: ...

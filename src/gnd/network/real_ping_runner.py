@@ -39,6 +39,14 @@ def _looks_like_ipv4(target: str) -> bool:
     return bool(_IPV4_PATTERN.match(target))
 
 
+def _looks_like_ipv6(target: str) -> bool:
+    """Heur: True si `target` parece una IPv6 literal (contiene ':').
+
+    No valida formato completo — solo heurística para evitar DNS sobre IP.
+    """
+    return ":" in target and "." not in target
+
+
 class RealPingRunner:
     """PingRunner real via subprocess sobre `ping` nativo del OS.
 
@@ -73,28 +81,48 @@ class RealPingRunner:
         provider: str,
         count: int,
         timeout_ms: int,
+        *,
+        family: str = "ipv4",
     ) -> ProbeResult:
         """Implementa `Protocol PingRunner.ping`.
 
         EP §2.L (Liskov): signature y contrato identicos al fake.
 
-        `target_ip` puede ser un hostname o IPv4. Internamente se resuelve
-        a IPv4 para el sondeo, pero `ProbeResult.target_ip` guarda el valor
-        ORIGINAL del caller (hostname). Esto evita contaminar el baseline
-        historico si el DNS de un CDN (Cloudflare/Akamai) rota de IP entre
-        corridas — el baseline agrupa por `provider` + `target_ip` estable.
-        La IP resuelta del momento queda en logs para debug.
+        `target_ip` puede ser un hostname o IP. Internamente se resuelve
+        a la familia solicitada (AF_INET / AF_INET6) para el sondeo,
+        pero `ProbeResult.target_ip` guarda el valor ORIGINAL del caller.
+        Esto evita contaminar el baseline historico si el DNS de un CDN
+        rota de IP entre corridas. La IP resuelta del momento queda en
+        logs para debug.
+
+        Fase 12a.4: `family='ipv4'|'ipv6'`. `family=None` se infiere de
+        `target_ip` (`:` -> ipv6, si no ipv4) para usos ad-hoc.
         """
-        # Resolucion DNS inline (hostname -> IPv4) solo para el sondeo.
-        resolved_ip = self._resolve_target(target_ip)
+        # Inferir family si es None
+        if family not in ("ipv4", "ipv6"):
+            raise ValueError(f"family debe ser 'ipv4' o 'ipv6', no {family!r}")
+        # Resolucion DNS inline (hostname -> IP de la familia pedida) solo
+        # para el sondeo. `resolved_ip` se devuelve con la IP ya en su
+        # forma final (v4 o v6).
+        resolved_ip = self._resolve_target(target_ip, family=family)
         if resolved_ip is None:
-            logger.warning("DNS resolution failed target=%s -> UNREACHABLE", target_ip)
+            logger.warning(
+                "DNS resolution failed target=%s family=%s -> UNREACHABLE",
+                target_ip,
+                family,
+                extra={"provider": provider, "event": "ping.dns_failed"},
+            )
             return self._no_icmp_result(
-                target_ip, target_name, provider, count, ProbeOutcomeKind.UNREACHABLE
+                target_ip,
+                target_name,
+                provider,
+                count,
+                ProbeOutcomeKind.UNREACHABLE,
+                family=family,
             )
 
         # Ejecutar ping contra la IP resuelta.
-        args = self._build_args(resolved_ip, count, timeout_ms)
+        args = self._build_args(resolved_ip, count, timeout_ms, family=family)
         try:
             stdout, stderr, returncode = self._process_runner(args, timeout_ms)
         except subprocess.TimeoutExpired:
@@ -103,9 +131,15 @@ class RealPingRunner:
                 target_ip,
                 resolved_ip,
                 args,
+                extra={"provider": provider, "event": "ping.timeout"},
             )
             return self._no_icmp_result(
-                target_ip, target_name, provider, count, ProbeOutcomeKind.TIMEOUT
+                target_ip,
+                target_name,
+                provider,
+                count,
+                ProbeOutcomeKind.TIMEOUT,
+                family=family,
             )
         except OSError as exc:
             logger.exception(
@@ -113,6 +147,7 @@ class RealPingRunner:
                 target_ip,
                 resolved_ip,
                 exc,
+                extra={"provider": provider, "event": "ping.oserror"},
             )
             return self._no_icmp_result(
                 target_ip,
@@ -120,6 +155,7 @@ class RealPingRunner:
                 provider,
                 count,
                 ProbeOutcomeKind.UNREACHABLE,
+                family=family,
             )
 
         parsed = ping_parser.parse(stdout + "\n" + stderr)
@@ -130,42 +166,54 @@ class RealPingRunner:
             count,
             parsed,
             returncode,
+            family=family,
         )
 
-    def _resolve_target(self, target: str) -> str | None:
-        """Resuelve `target` (hostname o IPv4) a una IPv4.
+    # --- helpers privados ---
 
-        - Si ya es IPv4 (regex simple), lo devuelve tal cual.
-        - Si es hostname, intenta `socket.getaddrinfo` con AF_INET.
+    def _resolve_target(self, target: str, family: str = "ipv4") -> str | None:
+        """Resuelve `target` (hostname o IP) a una IP de la familia pedida.
+
+        - Si ya es IP (v4 o v6), lo devuelve tal cual.
+        - Si es hostname, intenta `socket.getaddrinfo` con la familia.
         - Devuelve None si la resolucion falla (no lanza).
         """
-        if _looks_like_ipv4(target):
+        if family not in ("ipv4", "ipv6"):
+            raise ValueError(f"family debe ser 'ipv4' o 'ipv6', no {family!r}")
+        # Detectar si target ya es una IP literal (IPv4 o IPv6).
+        # IPv6 tiene ':' — IPv4 tiene 4 octetos con puntos.
+        if _looks_like_ipv4(target) or _looks_like_ipv6(target):
             return target
+        sock_family = socket.AF_INET if family == "ipv4" else socket.AF_INET6
         try:
-            # AF_INET fuerza IPv4. getaddrinfo devuelve
-            # (family, type, proto, canonname, sockaddr).
-            infos = socket.getaddrinfo(target, None, socket.AF_INET)
+            infos = socket.getaddrinfo(target, None, sock_family)
             if not infos:
                 return None
             return infos[0][4][0]  # sockaddr[0] = IP
         except socket.gaierror:
             return None
 
-    # --- helpers privados ---
-
-    def _build_args(self, target_ip: str, count: int, timeout_ms: int) -> list[str]:
+    def _build_args(
+        self,
+        target_ip: str,
+        count: int,
+        timeout_ms: int,
+        family: str = "ipv4",
+    ) -> list[str]:
         if platform.system() == "Windows":
-            # Windows: timeout en ms.
-            return [
-                "ping",
-                "-n",
-                str(count),
-                "-w",
-                str(int(timeout_ms)),
-                target_ip,
-            ]
-        # POSIX: timeout en segundos (floor de ms/1000, minimo 1).
+            # Windows: ping -6 fuerza IPv6, ping -4 fuerza IPv4.
+            # Default (sin flag) usa la familia de target_ip.
+            args = ["ping"]
+            if family == "ipv6":
+                args.append("-6")
+            elif family == "ipv4":
+                args.append("-4")
+            args.extend(["-n", str(count), "-w", str(int(timeout_ms)), target_ip])
+            return args
+        # POSIX: ping6 para IPv6, ping para IPv4.
         timeout_s = max(1, int(timeout_ms / 1000))
+        if family == "ipv6":
+            return ["ping6", "-c", str(count), "-W", str(timeout_s), target_ip]
         return [
             "ping",
             "-c",
@@ -183,19 +231,23 @@ class RealPingRunner:
         count: int,
         parsed: ping_parser.ParsedPing,
         returncode: int,
+        family: str = "ipv4",
     ) -> ProbeResult:
         # Caso feliz: al menos un reply.
         if parsed.received > 0 and parsed.rtt_ms:
-            return self._success_result(target_ip, target_name, provider, count, parsed)
+            return self._success_result(
+                target_ip, target_name, provider, count, parsed, family=family
+            )
 
         # 100% packet loss: aplicar fallback TCP SYN.
         logger.info(
             "ICMP 100%% loss target=%s, intentando fallback TCP SYN :%d",
             target_ip,
             self._fallback_port,
+            extra={"provider": provider, "event": "ping.fallback_tcp_syn"},
         )
         return self._fallback_result(
-            target_ip, target_name, provider, count, parsed, returncode
+            target_ip, target_name, provider, count, parsed, returncode, family=family
         )
 
     def _success_result(
@@ -205,6 +257,7 @@ class RealPingRunner:
         provider: str,
         count: int,
         parsed: ping_parser.ParsedPing,
+        family: str = "ipv4",
     ) -> ProbeResult:
         from gnd.models.latency_stats import LatencyStats
 
@@ -216,9 +269,15 @@ class RealPingRunner:
                 "received>0 pero sin RTTs parseados target=%s summary=%s",
                 target_ip,
                 parsed.summary_line,
+                extra={"provider": provider, "event": "ping.no_rtts_parsed"},
             )
             return self._no_icmp_result(
-                target_ip, target_name, provider, count, ProbeOutcomeKind.TIMEOUT
+                target_ip,
+                target_name,
+                provider,
+                count,
+                ProbeOutcomeKind.TIMEOUT,
+                family=family,
             )
         avg, mn, mx, jitter, samples = stats_tuple
         return ProbeResult(
@@ -235,6 +294,7 @@ class RealPingRunner:
                 samples=samples,
             ),
             timestamp=datetime.now(),
+            family=family,
         )
 
     def _fallback_result(
@@ -245,6 +305,7 @@ class RealPingRunner:
         count: int,
         parsed: ping_parser.ParsedPing,
         returncode: int,
+        family: str = "ipv4",
     ) -> ProbeResult:
         tcp_outcome = tcp_syn_probe.probe(
             target_ip,
@@ -257,9 +318,15 @@ class RealPingRunner:
                 "FILTERED target=%s (TCP SYN: %s)",
                 target_ip,
                 tcp_outcome.detail,
+                extra={"provider": provider, "event": "ping.filtered"},
             )
             return self._no_icmp_result(
-                target_ip, target_name, provider, count, ProbeOutcomeKind.FILTERED
+                target_ip,
+                target_name,
+                provider,
+                count,
+                ProbeOutcomeKind.FILTERED,
+                family=family,
             )
 
         # TCP tambien fallo: distinguir UNREACHABLE vs TIMEOUT.
@@ -281,8 +348,15 @@ class RealPingRunner:
             tcp_outcome.detail,
             parsed.error_letter,
             returncode,
+            extra={
+                "provider": provider,
+                "event": "ping.fallback_outcome",
+                "outcome": kind.name,
+            },
         )
-        return self._no_icmp_result(target_ip, target_name, provider, count, kind)
+        return self._no_icmp_result(
+            target_ip, target_name, provider, count, kind, family=family
+        )
 
     def _no_icmp_result(
         self,
@@ -291,6 +365,7 @@ class RealPingRunner:
         provider: str,
         count: int,
         kind: ProbeOutcomeKind,
+        family: str = "ipv4",
     ) -> ProbeResult:
         return ProbeResult(
             target_name=target_name,
@@ -299,6 +374,7 @@ class RealPingRunner:
             outcome=kind,
             stats=None,
             timestamp=datetime.now(),
+            family=family,
         )
 
 

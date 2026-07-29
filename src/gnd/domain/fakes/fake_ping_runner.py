@@ -33,6 +33,8 @@ class FakePingRunner:
         provider: str,
         count: int,
         timeout_ms: int,
+        *,
+        family: str = "ipv4",
     ) -> ProbeResult:
         self.calls.append(
             {
@@ -41,6 +43,7 @@ class FakePingRunner:
                 "provider": provider,
                 "count": count,
                 "timeout_ms": timeout_ms,
+                "family": family,
             }
         )
         if target_ip in self._results:
@@ -54,6 +57,7 @@ class FakePingRunner:
                 outcome=base.outcome,
                 stats=base.stats,
                 timestamp=base.timestamp,
+                family=family,
             )
         # Fallback: SUCCESS con stats mínimos
         return ProbeResult(
@@ -70,4 +74,5 @@ class FakePingRunner:
                 samples=count,
             ),
             timestamp=datetime.now(),
+            family=family,
         )

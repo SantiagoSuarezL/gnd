@@ -221,3 +221,7 @@ __marimo__/
 opencode.json
 .agent/
 .claude/
+graphify-out/
+
+# Previews de gráficos Fase 10 (salidas PNG regenerables + sparse.db artefacto)
+phase10_charts_preview/

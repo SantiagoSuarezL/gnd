@@ -284,32 +284,38 @@ class TestAtomicity:
 
 
 # --------------------------------------------------------------------------- #
-# Schema version 2 retro-compatibilidad
+# Schema version 3 retro-compatibilidad (Fase 12a.4)
 # --------------------------------------------------------------------------- #
 
 
-def test_schema_version_es_2():
+def test_schema_version_es_3():
     conn = sqlite3.connect(":memory:")
     ensure_schema(conn)
     cur = conn.execute("SELECT MAX(version) FROM schema_version")
     v = cur.fetchone()[0]
     assert v == SCHEMA_VERSION
-    assert SCHEMA_VERSION == 2
+    assert SCHEMA_VERSION == 3
 
 
-def test_tablas_v1_no_se_rompen_con_v2():
-    """Garantia de retro-compatibilidad: la migracion v2 solo agrega tablas,
-    no modifica las existentes. Inserta un run_id en v1 tablas y lee."""
+def test_tablas_v1_no_se_rompen_con_v3():
+    """Garantia de retro-compatibilidad: la migracion v3 anade columnas
+    `family` a probe_results y traceroute_results (ALTER TABLE ADD COLUMN
+    con DEFAULT 'ipv4'). Las rows pre-IPv6 reciben el default 'ipv4'."""
     conn = sqlite3.connect(":memory:")
     ensure_schema(conn)
+    # Verificar que las columnas existen con el default 'ipv4'.
+    probe_cols = [r[1] for r in conn.execute("PRAGMA table_info(probe_results)")]
+    assert "family" in probe_cols
+    trac_cols = [r[1] for r in conn.execute("PRAGMA table_info(traceroute_results)")]
+    assert "family" in trac_cols
+    # Insertar un probe sin especificar family: debe usar DEFAULT 'ipv4'.
     conn.execute(
-        """INSERT INTO diagnostic_runs
-           (run_id, started_at, finished_at, recommendation_verdict,
-            recommendation_headline, recommendation_explanation,
-            recommendation_score, responsible_component)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        "INSERT INTO diagnostic_runs (run_id, started_at, finished_at, "
+        "recommendation_verdict, recommendation_headline, "
+        "recommendation_explanation, recommendation_score, "
+        "responsible_component) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            "test-v1",
+            "test-v3",
             "2026-07-25T00:00:00",
             "2026-07-25T00:00:01",
             "playable",
@@ -319,13 +325,36 @@ def test_tablas_v1_no_se_rompen_con_v2():
             "unknown",
         ),
     )
+    conn.execute(
+        "INSERT INTO probe_results (run_id, target_name, target_ip, provider, "
+        "outcome, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "test-v3",
+            "google_dns",
+            "8.8.8.8",
+            "google",
+            "SUCCESS",
+            "2026-07-25T00:00:00",
+        ),
+    )
     conn.commit()
     row = conn.execute(
-        "SELECT run_id FROM diagnostic_runs WHERE run_id = ?",
-        ("test-v1",),
+        "SELECT family FROM probe_results WHERE run_id = ?", ("test-v3",)
     ).fetchone()
-    assert row is not None
-    assert row[0] == "test-v1"
+    assert row[0] == "ipv4"
+
+
+def test_ensure_schema_idempotente_v3():
+    """ensure_schema puede llamarse multiples veces sin error (PRAGMA
+    table_info previene ADD COLUMN duplicado)."""
+    conn = sqlite3.connect(":memory:")
+    ensure_schema(conn)
+    ensure_schema(conn)  # Segunda llamada: no debe lanzar.
+    probe_cols = [r[1] for r in conn.execute("PRAGMA table_info(probe_results)")]
+    # La columna family debe aparecer UNA sola vez (no duplicada).
+    assert probe_cols.count("family") == 1
+    trac_cols = [r[1] for r in conn.execute("PRAGMA table_info(traceroute_results)")]
+    assert trac_cols.count("family") == 1
 
 
 def test_repo_v1_y_v2_comparten_misma_conexion():

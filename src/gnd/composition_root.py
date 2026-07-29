@@ -26,8 +26,13 @@ from gnd.database.sqlite_diagnostics_repository import SqliteDiagnosticsReposito
 from gnd.diagnostics.riot.active_game_server_detector import (
     ActiveGameServerDetector,
 )
+from gnd.network.real_dns_resolver import RealDnsResolver
+from gnd.network.real_network_interface_inspector import (
+    RealNetworkInterfaceInspector,
+)
 from gnd.network.real_ping_runner import RealPingRunner
 from gnd.network.real_traceroute_runner import RealTracerouteRunner
+from gnd.visualization import SqliteSeriesDataSource
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +57,23 @@ def _resolve_db_path(path: str) -> str:
     return str(p)
 
 
+def build_series_source() -> SqliteSeriesDataSource:
+    """Construye el SeriesDataSource para la pestaña Charts (Fase 10).
+
+    Reusa el path GndSettings.database.path — misma DB que el
+    SqliteDiagnosticsRepository, via una SqliteConnectionFactory nueva.
+    Devuelve una implementación de ``SeriesDataSource`` (Protocol).
+
+    Patron separado de ``build_run_full_diagnostics`` para no romper
+    callers existentes (3-tupla). La MainWindow recibe este source
+    como kwarg opcional ``series_source``.
+    """
+    settings = get_settings()
+    db_path = _resolve_db_path(settings.database.path)
+    db_factory = SqliteConnectionFactory(db_path)
+    return SqliteSeriesDataSource(db_factory)
+
+
 def build_run_full_diagnostics() -> (
     tuple[RunFullDiagnostics, DiagnosticTargets, DiagnosticParams]
 ):
@@ -69,6 +91,10 @@ def build_run_full_diagnostics() -> (
     settings = get_settings()
 
     # --- Targets (TECHNICAL_SPEC.md §6) ---
+    # Fase 12a.4: targets IPv6 opt-in. Si estan seteados en config, el
+    # use case duplica specs IPv6 (pings + traceroutes). Si todos son
+    # None/[] (default), la corrida solo hace IPv4 (backwards-compat total
+    # con runs pre-12a.4). FakeConnectionInspector para smoke sigue igual.
     targets = DiagnosticTargets(
         gateway_ip=_resolve_gateway_ip(),
         google_dns=settings.targets.google_dns,
@@ -76,6 +102,12 @@ def build_run_full_diagnostics() -> (
         quad9=settings.targets.quad9,
         riot_public=list(settings.targets.riot_public),
         game_process_names=set(settings.game_detection.process_names),
+        # Fase 12a.4: IPv6 opt-in desde config.targets.*_ipv6.
+        # None / [] -> no spec v6 para ese provider.
+        google_dns_ipv6=settings.targets.google_dns_ipv6,
+        cloudflare_ipv6=settings.targets.cloudflare_ipv6,
+        quad9_ipv6=settings.targets.quad9_ipv6,
+        riot_public_ipv6=list(settings.targets.riot_public_ipv6),
     )
 
     # --- Parametros (de config) ---
@@ -89,6 +121,19 @@ def build_run_full_diagnostics() -> (
         packet_loss_critical_pct=settings.thresholds.packet_loss_critical_pct,
         jitter_warning_ms=settings.thresholds.jitter_warning_ms,
         jitter_critical_ms=settings.thresholds.jitter_critical_ms,
+        # Fase 12a.2: metrica DNS opt-in. Si dns.enabled=False en config,
+        # la etapa se salta (sin overhead). Hosts vacios -> el use case
+        # cae a targets.riot_public como default sensato.
+        dns_enabled=settings.dns.enabled,
+        dns_hosts=tuple(settings.dns.hosts),
+        dns_timeout_ms=settings.dns.timeout_ms,
+        dns_include_ipv6=settings.dns.include_ipv6,
+        # Fase 12a.3: snapshot de interfaz de red opt-in. Si
+        # inspect_interface=False, etapa se salta. En v1 no se inyecta
+        # el nombre de la default-route iface (el adaptador real lo
+        # detecta en runtime); default None.
+        inspect_interface_enabled=settings.network.inspect_interface,
+        default_route_iface_hint=None,
     )
 
     # --- Adaptadores reales (Infrastructure layer) ---
@@ -97,6 +142,15 @@ def build_run_full_diagnostics() -> (
         jump_threshold_ms=settings.thresholds.hop_jump_threshold_ms,
     )
     connection_inspector = ActiveGameServerDetector()
+    # Fase 12a.2: DnsResolver real, siempre construido (aun con
+    # dns.enabled=False — el use case decide si la etapa corre). El
+    # resolver es stateless y barato; crearlo siempre simplifica DI y
+    # evita sorpresas si el usuario togglea `enabled` en runtime futuro.
+    dns_resolver = RealDnsResolver()
+    # Fase 12a.3: NetworkInterfaceInspector real (stateless). Mismo
+    # patron que dns_resolver: se construye siempre, el orquestador
+    # decide si la etapa corre segun params.inspect_interface_enabled.
+    interface_inspector = RealNetworkInterfaceInspector()
 
     # --- Persistencia ---
     # Regla de Oro 9.1 (Fase 9, bug threading SQLite): la factory crea una
@@ -116,6 +170,8 @@ def build_run_full_diagnostics() -> (
         connection_inspector=connection_inspector,
         repository=repository,
         db_factory=db_factory,
+        dns_resolver=dns_resolver,
+        interface_inspector=interface_inspector,
     )
 
     return use_case, targets, params

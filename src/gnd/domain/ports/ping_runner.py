@@ -30,4 +30,6 @@ class PingRunner(Protocol):
         provider: str,
         count: int,
         timeout_ms: int,
+        *,
+        family: str = "ipv4",
     ) -> ProbeResult: ...

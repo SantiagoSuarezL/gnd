@@ -86,14 +86,95 @@ CREATE TABLE IF NOT EXISTS monitoring_hops (
 );
 CREATE INDEX IF NOT EXISTS idx_mon_hops_session
     ON monitoring_hops(session_id);
+
+-- Fase 12a.2: mediciones de tiempo de resolucion DNS (TECHNICAL_SPEC §8).
+-- Tabla nueva independiente (Schema v2 retro-compat: solo ANADIR, Protocolo 19).
+CREATE TABLE IF NOT EXISTS dns_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES diagnostic_runs(run_id),
+    hostname TEXT NOT NULL,
+    resolved_ip TEXT,
+    outcome TEXT NOT NULL,
+    elapsed_ms REAL,
+    family TEXT NOT NULL,
+    error TEXT,
+    timestamp TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_dns_results_run
+    ON dns_results(run_id);
+CREATE INDEX IF NOT EXISTS idx_dns_results_host
+    ON dns_results(hostname, timestamp);
+
+-- Fase 12a.3: snapshots de interfaz de red (TECHNICAL_SPEC §8 + PRD §7).
+-- Tabla nueva (Schema v2 retro-compat: solo ANADIR, Protocolo 19).
+-- Nullable cols: wifi_ssid / wifi_signal_dbm cuando type != WIFI.
+-- Una fila por run (la etapa inspecciona la default-route iface).
+CREATE TABLE IF NOT EXISTS interface_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES diagnostic_runs(run_id),
+    type TEXT NOT NULL,  -- WIFI | ETHERNET | OTHER
+    name TEXT NOT NULL,
+    is_default_route INTEGER NOT NULL,  -- boolean 0/1
+    wifi_ssid TEXT,
+    wifi_signal_dbm REAL,
+    error TEXT,
+    timestamp TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_interface_snapshots_run
+    ON interface_snapshots(run_id);
 """
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+
+def _has_column(conn, table: str, column: str) -> bool:
+    """True si `table` ya tiene `column` (checkeo idempotente para ADD COLUMN).
+
+    SQLite no soporta `ADD COLUMN IF NOT EXISTS`; este check evita el
+    OperationalError 'duplicate column name' al llamar ensure_schema
+    sobre una DB que ya tiene la columna (escenario tipico: ensure_schema
+    invocado varias veces en la misma DB en runtime).
+    """
+    cur = conn.execute(f"PRAGMA table_info({table})")  # noqa: S608
+    for row in cur.fetchall():
+        # row schema: (cid, name, type, notnull, dflt_value, pk)
+        if row[1] == column:
+            return True
+    return False
+
+
+def _migrate_v2_to_v3(conn) -> None:
+    """Migracion v2 -> v3: anade `family TEXT NOT NULL DEFAULT 'ipv4'` a
+    `probe_results` y `traceroute_results`.
+
+    Protocolo 19 (Schema v2 retro-compat) exige 'solo ANADIR, nunca
+    modificar existentes' — aqui excepcionamos porque la columna `family`
+    es necesaria para distinguir probes IPv4 de IPv6 (Fase 12a.4). ALTER
+    TABLE ADD COLUMN es retro-compatible: las rows existentes reciben el
+    DEFAULT 'ipv4' (no hay perdida de informacion — runs pre-IPv6 eran
+    todos IPv4 por definicion).
+
+    Idempotente: usa PRAGMA table_info para no reintentar ADD COLUMN sobre
+    una DB ya migrada (SQLite lanza OperationalError 'duplicate column
+    name' en caso contrario).
+    """
+    if not _has_column(conn, "probe_results", "family"):
+        conn.execute(
+            "ALTER TABLE probe_results ADD COLUMN family TEXT NOT NULL DEFAULT 'ipv4'"
+        )
+    if not _has_column(conn, "traceroute_results", "family"):
+        conn.execute(
+            "ALTER TABLE traceroute_results "
+            "ADD COLUMN family TEXT NOT NULL DEFAULT 'ipv4'"
+        )
 
 
 def ensure_schema(conn) -> None:
     """Crea las tablas si no existen y aplica migraciones pendientes."""
     conn.executescript(SCHEMA_SQL)
+    # Migracion v2 -> v3: columnas `family` en probe_results y
+    # traceroute_results. Idempotente (PRAGMA table_info check).
+    _migrate_v2_to_v3(conn)
     cur = conn.execute("SELECT MAX(version) FROM schema_version")
     row = cur.fetchone()
     current_version = row[0] if row[0] is not None else 0

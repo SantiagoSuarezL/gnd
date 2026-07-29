@@ -36,6 +36,9 @@ class TracerouteResult:
     target_provider: str
     hops: list[TracerouteHop]
     culprit_hop_index: int | None
+    # Fase 12a.4: familia IP del sondeo. Default 'ipv4' backwards-compat
+    # con runs existentes. Vacio en fakes/traceroutes legacy.
+    family: str = "ipv4"
 
     def __post_init__(self) -> None:
         if not self.target_provider:
@@ -49,3 +52,5 @@ class TracerouteResult:
                 f"culprit_hop_index fuera de rango: {self.culprit_hop_index} "
                 f"(hops={len(self.hops)})"
             )
+        if self.family not in ("ipv4", "ipv6"):
+            raise ValueError(f"family debe ser 'ipv4' o 'ipv6', no {self.family!r}")

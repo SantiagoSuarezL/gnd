@@ -89,8 +89,8 @@ class SqliteDiagnosticsRepository:
         probe_sql = """INSERT INTO probe_results
             (run_id, target_name, target_ip, provider, outcome,
              avg_ms, min_ms, max_ms, jitter_ms, packet_loss_pct,
-             samples, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+             samples, timestamp, family)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
         for p in run.probes:
             conn.execute(
                 probe_sql,
@@ -107,12 +107,14 @@ class SqliteDiagnosticsRepository:
                     p.stats.packet_loss_pct if p.stats else None,
                     p.stats.samples if p.stats else None,
                     p.timestamp.isoformat(),
+                    # Fase 12a.4: familia IP (default 'ipv4' en el modelo).
+                    p.family,
                 ),
             )
 
         traceroute_sql = """INSERT INTO traceroute_results
-            (run_id, target_provider, culprit_hop_index, hops_json)
-            VALUES (?, ?, ?, ?)"""
+            (run_id, target_provider, culprit_hop_index, hops_json, family)
+            VALUES (?, ?, ?, ?, ?)"""
         for t in run.traceroutes:
             conn.execute(
                 traceroute_sql,
@@ -121,6 +123,8 @@ class SqliteDiagnosticsRepository:
                     t.target_provider,
                     t.culprit_hop_index,
                     json.dumps([_hop_to_dict(h) for h in t.hops]),
+                    # Fase 12a.4: familia IP (default 'ipv4' en el modelo).
+                    t.family,
                 ),
             )
 
@@ -137,6 +141,55 @@ class SqliteDiagnosticsRepository:
                     ags.protocol,
                     ags.detected_via,
                     ags.process_name,
+                ),
+            )
+
+        # Fase 12a.2: mediciones DNS (opcionales, vacio si la feature off o
+        # todos los hosts fallaron). Atomicidad: persistidas en la misma
+        # transaccion que el resto del run (Regla 8.4 — sin partial writes).
+        dns_sql = """INSERT INTO dns_results
+            (run_id, hostname, resolved_ip, outcome, elapsed_ms,
+             family, error, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)"""
+        # timestamp compartido: el finished_at del run (no hay marca de
+        # tiempo por medicion DNS en el modelo; la etapa DNS corre dentro
+        # de la corrida y el corte temporal relevante es el fin de run).
+        finished_iso = run.finished_at.isoformat()
+        for d in run.dns_results:
+            conn.execute(
+                dns_sql,
+                (
+                    run.run_id,
+                    d.hostname,
+                    d.resolved_ip,
+                    d.outcome.name,
+                    d.elapsed_ms,
+                    d.family,
+                    d.error,
+                    finished_iso,
+                ),
+            )
+
+        # Fase 12a.3: snapshot de interfaz de red (opcional). Mismo
+        # patron atomico (Regla 8.4) — una fila por run si la feature
+        # inspec_interface estaba habilitada y el inspector devolvio un
+        # snapshot (contrato del inspector: nunca devuelve None).
+        snap = run.interface_snapshot
+        if snap is not None:
+            conn.execute(
+                """INSERT INTO interface_snapshots
+                   (run_id, type, name, is_default_route, wifi_ssid,
+                    wifi_signal_dbm, error, timestamp)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    run.run_id,
+                    snap.type.name,
+                    snap.name,
+                    1 if snap.is_default_route else 0,
+                    snap.wifi_ssid,
+                    snap.wifi_signal_dbm,
+                    snap.error,
+                    finished_iso,
                 ),
             )
 

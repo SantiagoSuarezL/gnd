@@ -37,6 +37,14 @@ class Targets(BaseModel):
             "en vez de IPs fijas. RealPingRunner resuelve DNS inline."
         ),
     )
+    # Fase 12a.4: IPv6 opt-in. Si not None, se ejecutan probes v6
+    # ademas de los v4. Default None = feature off (backwards compat).
+    # Ejemplos: "2606:4700:4700::1111" (Cloudflare DNS IPv6),
+    # "2001:4860:4860::8888" (Google DNS IPv6).
+    google_dns_ipv6: str | None = None
+    cloudflare_ipv6: str | None = None
+    quad9_ipv6: str | None = None
+    riot_public_ipv6: list[str] = Field(default_factory=list)
 
 
 class Probes(BaseModel):
@@ -64,6 +72,83 @@ class Database(BaseModel):
     path: str = "%APPDATA%/GND/history.db"
 
 
+class Logging(BaseModel):
+    # Directorio de logs JSONL (Fase 11). %APPDATA% se expande en runtime
+    # (ver gnd.logging.configurer._resolve_logs_dir). Un archivo por dia
+    # con nombre `gnd_YYYYMMDD.jsonl`.
+    logs_dir: str = "%APPDATA%/GND/logs"
+    # Nivel del root logger (str pydantic lo valida contra ENUM implicito
+    # por typing, aca usamos str para evitar import logging en este modulo
+    # de settings — el caller traduce a int con getattr(logging, level)).
+    level: str = "INFO"
+    # Nivel del handler de consola (stderr). El archivo captura TODO el
+    # nivel del root logger; la consola solo warnings+errores por defecto
+    # para no saturear la terminal en uso interactivo.
+    console_level: str = "WARNING"
+    # Cantidad de archivos rotados a retener (Fase 12a.1). Default 30 dias.
+    # El `TimedRotatingFileHandler` rota el JSONL a medianoche y purga los
+    # mas viejos que `retention_days` en cada rotacion. Map directo al
+    # `backupCount` del stdlib.
+    retention_days: int = 30
+
+
+class Dns(BaseModel):
+    """Configuracion de la medicion de tiempo de resolucion DNS (Fase 12a.2).
+
+    TECHNICAL_SPEC.md §8 (gap): medir DNS como metrica independiente del ping
+    (que en algunos OS embebe la resolucion DNS en su primer sample si
+    el objetivo es un hostname).
+
+    `enabled=False` por default para respetar el principio YAGNI en v1
+    (Regla 9.5): el probing del pipeline ya hace resolution DNS en
+    RealPingRunner; la medicion separada solo aporta valor cuando se
+    quiere debuggear un DNS lento separately. Opt-in via config.toml
+    o env `GND_DNS__ENABLED=true`.
+
+    `hosts`: lista de hostnames a resolver. Si vacia (default), la
+    etapa usa `targets.riot_public` + el hostname del gateway (cuando
+    aplique — IP del gateway no es hostname). Default sensato:
+    riot_public (Riot rota hostname, util saber si DNS responde lento).
+
+    `timeout_ms`: limite por host. Un host que excede se reporta como
+    TIMEOUT y la corrida continua (EP §1.2).
+    """
+
+    enabled: bool = False
+    hosts: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Hostnames a resolver para medir tiempo DNS. Si vacio, la "
+            "etapa DNS usa targets.riot_public por defecto. Evitar IPs "
+            "(no tiene sentido medir DNS sobre una IP literal)."
+        ),
+    )
+    timeout_ms: int = 1000
+    # Default: probar IPv4. Si true, tambien probe IPv6 (si el host resuelve).
+    include_ipv6: bool = False
+
+
+class Network(BaseModel):
+    """Configuracion de la deteccion de interfaz de red (Fase 12a.3).
+
+    PRD §7 should-have + TECHNICAL_SPEC §8 gap. Snapshot del tipo de
+    interfaz activa (Wi-Fi / Ethernet / otros) + SSID + signal dBm cuando
+    Wi-Fi. Informacion de contexto local — no entra al motor de
+    recomendacion v1, solo se persiste para observabilidad.
+
+    `inspect_interface=False` por default (YAGNI en v1, Regla 9.5) —
+    el usuario opt-in via `GND_NETWORK__INSPECT_INTERFACE=true` en
+    config.toml o env. Sensible: usuarios con interfaces raras (VPNs,
+    bridges) pueden skip.
+
+    `netsh_timeout_ms`: limite del subprocess `netsh wlan show interfaces`
+    en Windows. Si el driver WLAN cuelga, no blocka la corrida (EP §1.2).
+    """
+
+    inspect_interface: bool = False
+    netsh_timeout_ms: int = 3000
+
+
 # ---------------------------------------------------------------------------
 # Settings raiz
 # ---------------------------------------------------------------------------
@@ -75,6 +160,9 @@ class GndSettings(BaseSettings):
     game_detection: GameDetection = GameDetection()
     thresholds: Thresholds = Thresholds()
     database: Database = Database()
+    logging: Logging = Logging()
+    dns: Dns = Dns()
+    network: Network = Network()
 
     model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(
         env_prefix="GND_",

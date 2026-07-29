@@ -23,6 +23,8 @@ class FakeTracerouteRunner:
         target_provider: str,
         max_hops: int,
         timeout_ms: int,
+        *,
+        family: str = "ipv4",
     ) -> TracerouteResult:
         self.calls.append(
             {
@@ -30,6 +32,7 @@ class FakeTracerouteRunner:
                 "target_provider": target_provider,
                 "max_hops": max_hops,
                 "timeout_ms": timeout_ms,
+                "family": family,
             }
         )
         if target_ip in self._results:
@@ -49,4 +52,5 @@ class FakeTracerouteRunner:
                 )
             ],
             culprit_hop_index=None,
+            family=family,
         )

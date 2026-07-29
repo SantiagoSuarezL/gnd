@@ -29,6 +29,7 @@ from gnd.application.run_full_diagnostics import (
     RunFullDiagnostics,
 )
 from gnd.models.diagnostic_run import DiagnosticRun
+from gnd.ui.charts_section import ChartsSection
 from gnd.ui.controller import DiagnosticsController
 from gnd.ui.sections import (
     CurrentStatusSection,
@@ -37,6 +38,7 @@ from gnd.ui.sections import (
     RecommendationsSection,
     RouteAnalysisSection,
 )
+from gnd.visualization import SeriesDataSource
 
 logger = logging.getLogger(__name__)
 
@@ -104,10 +106,12 @@ class MainWindow:
         use_case: RunFullDiagnostics,
         targets: DiagnosticTargets,
         params: DiagnosticParams,
+        series_source: SeriesDataSource | None = None,
     ) -> None:
         self._use_case = use_case
         self._targets = targets
         self._params = params
+        self._series_source = series_source
         self._controller = DiagnosticsController(
             use_case=use_case,
             targets=targets,
@@ -159,6 +163,10 @@ class MainWindow:
         nb.add(self._sec_hist, text="Historical Comparison")
         self._sec_rec = RecommendationsSection(nb)
         nb.add(self._sec_rec, text="Recommendations")
+        self._sec_charts = ChartsSection(nb)
+        nb.add(self._sec_charts, text="Charts")
+        if self._series_source is not None:
+            self._sec_charts.set_source(self._series_source)
 
         # Inicialmente vacias
         for sec in (
@@ -229,6 +237,15 @@ class MainWindow:
         self._sec_route.update_state(route_state)
         self._sec_hist.update_state(hist_state)
         self._sec_rec.update_state(rec_state)
+
+        # Charts: auto-refresh para que los nuevos datos del run aparezcan
+        # en los gráficos sin que el usuario tenga que tocar "Refresh".
+        # El refresh es sync (queries rápidas) y solo si hay source seteada.
+        if self._series_source is not None:
+            try:
+                self._sec_charts.refresh()
+            except Exception:  # noqa: BLE001 — no romper la UI por un chart
+                logger.exception("Falla refrescando charts tras run")
 
         self._run_button.configure(state="normal")
         ts = datetime.now().strftime("%H:%M:%S")

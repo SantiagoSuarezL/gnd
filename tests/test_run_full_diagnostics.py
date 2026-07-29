@@ -16,6 +16,8 @@ etapas del flujo (ARCHITECTURE.md §5) y que:
 
 from __future__ import annotations
 
+import json
+import logging
 from datetime import datetime
 
 from gnd.application.run_full_diagnostics import (
@@ -30,6 +32,7 @@ from gnd.domain.fakes.fake_ping_runner import FakePingRunner
 from gnd.domain.fakes.fake_traceroute_runner import (
     FakeTracerouteRunner,
 )
+from gnd.logging import JsonFormatter
 from gnd.models.active_game_server import ActiveGameServerInfo
 
 
@@ -229,3 +232,133 @@ class TestFormatProbeAnomaliesExporter:
 
         result = _format_probe_anomalies([])
         assert "sin anomalias" in result
+
+
+class TestStructuredLoggingEvents:
+    """Fase 11: RunFullDiagnostics.execute() emite eventos JSON estructurados
+    `run.start` y `run.finish` con run_id vinculado por RunContextAdapter, mas
+    eventos `stage.start`/`stage.finish` para cada una de las 7 etapas.
+
+    Verificacion: capturamos los records con caplog + JsonFormatter y
+    comprobamos que cada linea parsea a JSON con run_id correcto y
+    campo `event` == "run.start" / "run.finish" / "stage.start" / etc.
+    """
+
+    @staticmethod
+    def _records_as_jsons(caplog) -> list[dict]:
+        """Convierte caplog.records a dicts parseados con JsonFormatter."""
+        formatter = JsonFormatter()
+        return [json.loads(formatter.format(r)) for r in caplog.records]
+
+    def _assert_events_present(self, payloads, expected_events):
+        actual = {p.get("event") for p in payloads}
+        for ev in expected_events:
+            assert ev in actual, f"Event {ev} not in {sorted(actual)}"
+
+    def test_emits_run_start_and_run_finish_with_run_id(self, caplog):
+
+        uc = _build_use_case()
+        with caplog.at_level(
+            logging.INFO, logger="gnd.application.run_full_diagnostics"
+        ):
+            uc.execute(_targets(), _params(), run_id="logrid-001")
+
+        payloads = self._records_as_jsons(caplog)
+        run_starts = [p for p in payloads if p.get("event") == "run.start"]
+        run_finishes = [p for p in payloads if p.get("event") == "run.finish"]
+        assert len(run_starts) == 1
+        assert len(run_finishes) == 1
+        assert run_starts[0]["run_id"] == "logrid-001"
+        assert run_finishes[0]["run_id"] == "logrid-001"
+        # run.finish tiene duracion y veredicto
+        assert "duration_ms" in run_finishes[0]
+        assert "verdict" in run_finishes[0]
+        assert "n_probes" in run_finishes[0]
+
+    def test_emits_stage_events_for_seven_stages(self, caplog):
+        # Esperamos pares start/finish para: pings, detect_game_server,
+        # traceroutes, baseline, recommendation, persistence (6 stages).
+        # (No stage.* para "Persistence start/finish" limitado: se emiten.)
+        uc = _build_use_case()
+        with caplog.at_level(
+            logging.INFO, logger="gnd.application.run_full_diagnostics"
+        ):
+            uc.execute(_targets(), _params())
+
+        payloads = self._records_as_jsons(caplog)
+        stages_started = [p for p in payloads if p.get("event") == "stage.start"]
+        stages_finished = [p for p in payloads if p.get("event") == "stage.finish"]
+        stage_names_started = {p["stage"] for p in stages_started}
+        stage_names_finished = {p["stage"] for p in stages_finished}
+        expected_stages = {
+            "pings",
+            "detect_game_server",
+            "traceroutes",
+            "baseline",
+            "recommendation",
+            "persistence",
+        }
+        assert expected_stages.issubset(stage_names_started)
+        assert expected_stages.issubset(stage_names_finished)
+
+    def test_run_finish_includes_score_and_verdict(self, caplog):
+        uc = _build_use_case()
+        with caplog.at_level(
+            logging.INFO, logger="gnd.application.run_full_diagnostics"
+        ):
+            run = uc.execute(_targets(), _params(), run_id="rid-score")
+
+        payloads = self._records_as_jsons(caplog)
+        run_finished = next(p for p in payloads if p.get("event") == "run.finish")
+        assert run_finished["score"] == run.recommendation.score
+        assert run_finished["verdict"] == run.recommendation.verdict
+        assert run_finished["n_probes"] == len(run.probes)
+
+    def test_persistence_error_logs_stage_error_and_run_still_finishes(self, caplog):
+        class FailingRepo(_RepoSpy):
+            def save_run(self, run):
+                raise RuntimeError("DB corrupta para log")
+
+        uc = _build_use_case(repository=FailingRepo())
+        with caplog.at_level(
+            logging.INFO, logger="gnd.application.run_full_diagnostics"
+        ):
+            uc.execute(_targets(), _params(), run_id="rid-persist-err")
+
+        payloads = self._records_as_jsons(caplog)
+        errors = [p for p in payloads if p.get("event") == "stage.error"]
+        assert any(p["stage"] == "persistence" for p in errors)
+        # el stage.finish persistence debe reportar success=False
+        persist_finish = next(
+            p
+            for p in payloads
+            if p.get("event") == "stage.finish" and p.get("stage") == "persistence"
+        )
+        assert persist_finish["success"] is False
+        # run.finish igual se emite (la corrida no aborta)
+        assert any(p.get("event") == "run.finish" for p in payloads)
+        # el record de error debe tener `exc` (stacktrace) serializado
+        error_record = next(
+            r for r in caplog.records if getattr(r, "event", None) == "stage.error"
+        )
+        payload_of_error = json.loads(JsonFormatter().format(error_record))
+        assert "exc" in payload_of_error
+        assert "DB corrupta para log" in payload_of_error["exc"]
+
+    def test_run_id_unset_when_not_passed_still_logs_other_fields(self, caplog):
+        # Sin run_id explicito, el adapter sigue logueando otros campos
+        # (event, stage, etc.). run_id NO debe aparecer como null en el JSON
+        # (JsonFormatter lo omite si es None).
+        uc = _build_use_case()
+        with caplog.at_level(
+            logging.INFO, logger="gnd.application.run_full_diagnostics"
+        ):
+            uc.execute(_targets(), _params())  # sin run_id kwarg
+
+        payloads = self._records_as_jsons(caplog)
+        # todos los records emitidos por el use case llevan algun run_id
+        # (UUID autogenerado) — verificar que SI esta presente y no nulo.
+        use_case_events = [
+            p for p in payloads if p.get("event") in ("run.start", "run.finish")
+        ]
+        assert all(p.get("run_id") for p in use_case_events)

@@ -33,6 +33,7 @@ class TestMainWindowSmoke:
         from gnd.domain.fakes.fake_traceroute_runner import (
             FakeTracerouteRunner,
         )
+        from gnd.ui.charts_section import ChartsSection
         from gnd.ui.main_window import MainWindow
         from gnd.ui.sections import (
             CurrentStatusSection,
@@ -82,11 +83,84 @@ class TestMainWindowSmoke:
         assert isinstance(window._sec_hist, HistoricalComparisonSection)
         assert isinstance(window._sec_rec, RecommendationsSection)
 
+        # Fase 10: la sexta pestaña ChartsSection también existe.
+        assert isinstance(window._sec_charts, ChartsSection)
+
         # Las secciones son widgets (children del root).
         n_children = len(window._root.winfo_children())
         assert n_children >= 2  # al menos top frame + notebook
 
         # Cerrar limpiamente (sin mainloop).
+        window._root.destroy()
+
+    def test_charts_tab_refresh_renderiza_5_graficos_con_fake_source(self):
+        """Fase 10: la pestaña Charts refresh renderiza los 5 gráficos
+        con datos sintéticos via FakeSeriesDataSource (sin DB real).
+
+        No valida visualmente los gráficos (eso cubre test_visualization_charts),
+        solo que el widget ChartsSection cumple el contrato de refresh.
+        """
+        import matplotlib
+
+        matplotlib.use("Agg")  # headless, no abre ventana
+
+        from gnd.application.run_full_diagnostics import (
+            DiagnosticParams,
+            DiagnosticTargets,
+            RunFullDiagnostics,
+        )
+        from gnd.domain.fakes import (
+            FakeConnectionInspector,
+            FakeDiagnosticsRepository,
+            FakePingRunner,
+            FakeSeriesDataSource,
+            FakeTracerouteRunner,
+        )
+        from gnd.ui.main_window import MainWindow
+
+        targets = DiagnosticTargets(
+            gateway_ip="192.168.1.1",
+            google_dns="8.8.8.8",
+            cloudflare="1.1.1.1",
+            quad9="9.9.9.9",
+            riot_public=["auth.riotgames.com"],
+            game_process_names={"League of Legends.exe"},
+        )
+        params = DiagnosticParams(
+            ping_count=4,
+            ping_timeout_ms=1000,
+            traceroute_max_hops=10,
+            traceroute_timeout_ms=1000,
+            baseline_period_days=30,
+            packet_loss_warning_pct=1.0,
+            packet_loss_critical_pct=3.0,
+            jitter_warning_ms=20.0,
+            jitter_critical_ms=40.0,
+        )
+        use_case = RunFullDiagnostics(
+            ping_runner=FakePingRunner(),
+            traceroute_runner=FakeTracerouteRunner(),
+            connection_inspector=FakeConnectionInspector(),
+            repository=FakeDiagnosticsRepository(),
+            db_factory=None,
+        )
+
+        window = MainWindow(
+            use_case=use_case,
+            targets=targets,
+            params=params,
+            series_source=FakeSeriesDataSource(),
+        )
+
+        # Refresh directo: debe renderizar sin excepción y figures se
+        # guardan internamente (uno por gráfico).
+        window._sec_charts.refresh()
+        assert len(window._sec_charts._figures) == 5
+
+        # Refrescar de nuevo debe vaciar la lista previa (no acumular).
+        window._sec_charts.refresh()
+        assert len(window._sec_charts._figures) == 5
+
         window._root.destroy()
 
     def test_apply_run_pobla_todas_las_secciones_sin_excepcion(self):

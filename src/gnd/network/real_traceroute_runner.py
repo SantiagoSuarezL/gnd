@@ -51,6 +51,11 @@ def _looks_like_ipv4(target: str) -> bool:
     return bool(_IPV4_PATTERN.match(target))
 
 
+def _looks_like_ipv6(target: str) -> bool:
+    """Heur: True si `target` parece una IPv6 literal (contiene ':')."""
+    return ":" in target and "." not in target
+
+
 # --- Deteccion del culprit hop (logica pura, testeable sin red) ---
 
 
@@ -226,37 +231,44 @@ class RealTracerouteRunner:
         target_provider: str,
         max_hops: int,
         timeout_ms: int,
+        *,
+        family: str = "ipv4",
     ) -> TracerouteResult:
         """Implementa `Protocol TracerouteRunner.traceroute`.
 
-        EP \u00a72.L (Liskov): signature y contrato identicos al fake.
+        EP §2.L (Liskov): signature y contrato identicos al fake.
 
-        ``target_ip`` puede ser un hostname o IPv4. Internamente se resuelve
-        a IPv4 para el sondeo. El tracert se ejecuta con ``-d`` (sin DNS
+        ``target_ip`` puede ser un hostname o IP. Internamente se resuelve
+        a la familia solicitada. El tracert se ejecuta con ``-d`` (sin DNS
         reverse de hops) para acelerar el output. Los hops individuales no
         traen hostname (mask ``-d``), pero el ``target_ip`` del hop final es
         la IP resuelta (no el hostname del caller).
 
-        No lanza excepciones hacia el caller (EP \u00a71.2): toda condicion de
+        No lanza excepciones hacia el caller (EP §1.2): toda condicion de
         red se devuelve como TracerouteResult posiblemente vacio.
+
+        Fase 12a.4: ``family='ipv4'|'ipv6'``.
         """
-        # Resolucion DNS inline (hostname -> IPv4) solo para el sondeo.
-        resolved_ip = self._resolve_target(target_ip)
+        if family not in ("ipv4", "ipv6"):
+            raise ValueError(f"family debe ser 'ipv4' o 'ipv6', no {family!r}")
+
+        # Resolucion DNS inline (hostname -> IP de la familia pedida) solo
+        # para el sondeo.
+        resolved_ip = self._resolve_target(target_ip, family=family)
         if resolved_ip is None:
             logger.warning(
-                "DNS resolution failed target=%s -> TracerouteResult vacio",
+                "DNS resolution failed target=%s family=%s -> TracerouteResult vacio",
                 target_ip,
+                family,
+                extra={"provider": target_provider, "event": "traceroute.dns_failed"},
             )
-            return self._empty_result(target_provider)
+            return self._empty_result(target_provider, family=family)
 
-        args = self._build_args(resolved_ip, max_hops, timeout_ms)
-        # Timeout total estimado: max_hops * (3 probes * timeout_ms/1000
-        # + 1.5s overhead) + margen generoso. Windows tracert default-up-to
-        # 30 hops puede tomar ~45s.
-        estimated_total = max_hops * (3 * max(timeout_ms / 1000.0, 1.0) + 1.5) + 10.0
+        args = self._build_args(resolved_ip, max_hops, timeout_ms, family=family)
+        total_timeout_s = max_hops * (3 * timeout_ms / 1000 + 1.5) + 30.0
         try:
             stdout, _stderr, _returncode = self._process_runner(
-                args, total_timeout_s=estimated_total
+                args, total_timeout_s=total_timeout_s
             )
         except subprocess.TimeoutExpired:
             logger.warning(
@@ -264,18 +276,18 @@ class RealTracerouteRunner:
                 target_ip,
                 resolved_ip,
                 args,
+                extra={"provider": target_provider, "event": "traceroute.timeout"},
             )
-            # Tracert escribe hops incrementalmente; en timeout podemos tener
-            # output parcial. El parser lo maneja: retornamos lo que se haya parseado.
-            stdout = ""
+            return self._empty_result(target_provider, family=family)
         except OSError as exc:
             logger.exception(
                 "tracert subprocess OSError target=%s (resolved=%s): %s",
                 target_ip,
                 resolved_ip,
                 exc,
+                extra={"provider": target_provider, "event": "traceroute.oserror"},
             )
-            return self._empty_result(target_provider)
+            return self._empty_result(target_provider, family=family)
 
         parsed = tracert_parser.parse(stdout)
         if not parsed.hops:
@@ -283,43 +295,65 @@ class RealTracerouteRunner:
                 "tracert output sin hops reconocidos target=%s (resolved=%s)",
                 target_ip,
                 resolved_ip,
+                extra={"provider": target_provider, "event": "traceroute.no_hops"},
             )
-            return self._empty_result(target_provider)
+            return self._empty_result(target_provider, family=family)
 
-        return self._to_traceroute_result(parsed, target_provider)
+        return self._to_traceroute_result(parsed, target_provider, family=family)
 
-    def _resolve_target(self, target: str) -> str | None:
-        """Resuelve `target` (hostname o IPv4) a una IPv4.
+    # --- helpers privados ---
 
-        - Si ya es IPv4 (regex simple), lo devuelve tal cual.
-        - Si es hostname, intenta `socket.getaddrinfo` con AF_INET.
+    def _resolve_target(self, target: str, family: str = "ipv4") -> str | None:
+        """Resuelve `target` (hostname o IP) a una IP de la familia pedida.
+
+        - Si ya es IP (v4 o v6), lo devuelve tal cual.
+        - Si es hostname, intenta `socket.getaddrinfo` con la familia.
         - Devuelve None si la resolucion falla (no lanza).
         """
-        if _looks_like_ipv4(target):
+        if family not in ("ipv4", "ipv6"):
+            raise ValueError(f"family debe ser 'ipv4' o 'ipv6', no {family!r}")
+        if _looks_like_ipv4(target) or _looks_like_ipv6(target):
             return target
+        sock_family = socket.AF_INET if family == "ipv4" else socket.AF_INET6
         try:
-            infos = socket.getaddrinfo(target, None, socket.AF_INET)
+            infos = socket.getaddrinfo(target, None, sock_family)
             if not infos:
                 return None
             return infos[0][4][0]
         except socket.gaierror:
             return None
 
-    def _build_args(self, target_ip: str, max_hops: int, timeout_ms: int) -> list[str]:
+    def _build_args(
+        self,
+        target_ip: str,
+        max_hops: int,
+        timeout_ms: int,
+        family: str = "ipv4",
+    ) -> list[str]:
         if platform.system() == "Windows":
-            # Windows: -d = no resolver hostname de hops; -h = max hops;
-            # -w = timeout (ms).
+            # Windows: tracert -6 fuerza IPv6, tracert -4 fuerza IPv4.
+            args = ["tracert"]
+            if family == "ipv6":
+                args.append("-6")
+            elif family == "ipv4":
+                args.append("-4")
+            args.extend(
+                ["-d", "-h", str(max_hops), "-w", str(int(timeout_ms)), target_ip]
+            )
+            return args
+        # POSIX: traceroute -6 para IPv6, traceroute para IPv4.
+        timeout_s = max(1, int(timeout_ms / 1000))
+        if family == "ipv6":
             return [
-                "tracert",
-                "-d",
-                "-h",
+                "traceroute",
+                "-6",
+                "-n",
+                "-m",
                 str(max_hops),
                 "-w",
-                str(int(timeout_ms)),
+                str(timeout_s),
                 target_ip,
             ]
-        # POSIX: `traceroute` (sin -d en algunas variantes; -m max_hops; -w wait_s).
-        timeout_s = max(1, int(timeout_ms / 1000))
         return [
             "traceroute",
             "-n",  # no resolver hostname (equivalente -d de Windows)
@@ -330,10 +364,31 @@ class RealTracerouteRunner:
             target_ip,
         ]
 
+    def _empty_result(
+        self, target_provider: str, family: str = "ipv4"
+    ) -> TracerouteResult:
+        """TracerouteResult vacio: hops no vacio (invariante del modelo exige
+        al menos 1 hop). Usamos un hop placeholder que indique "sin datos".
+        """
+        placeholder = TracerouteHop(
+            hop_number=1,
+            ip=None,
+            hostname=None,
+            rtt_ms=None,
+            responded=False,
+        )
+        return TracerouteResult(
+            target_provider=target_provider,
+            hops=[placeholder],
+            culprit_hop_index=None,
+            family=family,
+        )
+
     def _to_traceroute_result(
         self,
         parsed: tracert_parser.ParsedTracert,
         target_provider: str,
+        family: str = "ipv4",
     ) -> TracerouteResult:
         hops_models = [
             TracerouteHop(
@@ -354,21 +409,5 @@ class RealTracerouteRunner:
             target_provider=target_provider,
             hops=hops_models,
             culprit_hop_index=culprit_idx,
-        )
-
-    def _empty_result(self, target_provider: str) -> TracerouteResult:
-        """TracerouteResult vacio: hops no vacio (invariante del modelo exige
-        al menos 1 hop). Usamos un hop placeholder que indique "sin datos".
-        """
-        placeholder = TracerouteHop(
-            hop_number=1,
-            ip=None,
-            hostname=None,
-            rtt_ms=None,
-            responded=False,
-        )
-        return TracerouteResult(
-            target_provider=target_provider,
-            hops=[placeholder],
-            culprit_hop_index=None,
+            family=family,
         )
