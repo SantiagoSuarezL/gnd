@@ -307,3 +307,220 @@ class TestMainWindowSmoke:
             assert "perdid" in rec_text.lower() or "loss" in rec_text.lower()
         finally:
             window._root.destroy()
+
+    def test_boton_export_markdown_disabled_inicial_y_enabled_tras_run(self):
+        """Fase 12b.1: el botón 'Export Markdown' arranca disabled y se
+        habilita solo cuando un run exitoso queda disponible via _apply_run."""
+        from gnd.application.run_full_diagnostics import (
+            DiagnosticParams,
+            DiagnosticTargets,
+            RunFullDiagnostics,
+        )
+        from gnd.domain.fakes.fake_connection_inspector import (
+            FakeConnectionInspector,
+        )
+        from gnd.domain.fakes.fake_diagnostics_repository import (
+            FakeDiagnosticsRepository,
+        )
+        from gnd.domain.fakes.fake_ping_runner import FakePingRunner
+        from gnd.domain.fakes.fake_traceroute_runner import (
+            FakeTracerouteRunner,
+        )
+        from gnd.ui.main_window import MainWindow
+
+        targets = DiagnosticTargets(
+            gateway_ip="192.168.1.1",
+            google_dns="8.8.8.8",
+            cloudflare="1.1.1.1",
+            quad9="9.9.9.9",
+            riot_public=["auth.riotgames.com"],
+            game_process_names={"League of Legends.exe"},
+        )
+        params = DiagnosticParams(
+            ping_count=4,
+            ping_timeout_ms=1000,
+            traceroute_max_hops=10,
+            traceroute_timeout_ms=1000,
+            baseline_period_days=30,
+            packet_loss_warning_pct=1.0,
+            packet_loss_critical_pct=3.0,
+            jitter_warning_ms=20.0,
+            jitter_critical_ms=40.0,
+        )
+        use_case = RunFullDiagnostics(
+            ping_runner=FakePingRunner(),
+            traceroute_runner=FakeTracerouteRunner(),
+            connection_inspector=FakeConnectionInspector(),
+            repository=FakeDiagnosticsRepository(),
+            db_factory=None,
+        )
+        window = MainWindow(use_case=use_case, targets=targets, params=params)
+        try:
+            # Inicialmente: botón disabled, _last_run is None.
+            assert str(window._export_button.cget("state")) == "disabled"
+            assert window._last_run is None
+
+            # Ejecuta un run (sync via use_case, no via controller thread)
+            # y aplica el resultado como lo haria el callback on_result.
+            run = use_case.execute(targets, params)
+            window._apply_run(run)
+
+            # Tras apply_run: botón habilitado, _last_run seteado.
+            assert str(window._export_button.cget("state")) == "normal"
+            assert window._last_run is run
+        finally:
+            window._root.destroy()
+
+    def test_handler_export_es_noop_si_no_hay_run(self):
+        """Fase 12b.1: si _last_run es None (botón fuerce habilitado via
+        teclado o programático), el handler no levanta excepcion — es no-op
+        silencioso. Guarde defensiva."""
+        from gnd.application.run_full_diagnostics import (
+            DiagnosticParams,
+            DiagnosticTargets,
+            RunFullDiagnostics,
+        )
+        from gnd.domain.fakes.fake_connection_inspector import (
+            FakeConnectionInspector,
+        )
+        from gnd.domain.fakes.fake_diagnostics_repository import (
+            FakeDiagnosticsRepository,
+        )
+        from gnd.domain.fakes.fake_ping_runner import FakePingRunner
+        from gnd.domain.fakes.fake_traceroute_runner import (
+            FakeTracerouteRunner,
+        )
+        from gnd.ui.main_window import MainWindow
+
+        targets = DiagnosticTargets(
+            gateway_ip="192.168.1.1",
+            google_dns="8.8.8.8",
+            cloudflare="1.1.1.1",
+            quad9="9.9.9.9",
+            riot_public=["auth.riotgames.com"],
+            game_process_names={"League of Legends.exe"},
+        )
+        params = DiagnosticParams(
+            ping_count=4,
+            ping_timeout_ms=1000,
+            traceroute_max_hops=10,
+            traceroute_timeout_ms=1000,
+            baseline_period_days=30,
+            packet_loss_warning_pct=1.0,
+            packet_loss_critical_pct=3.0,
+            jitter_warning_ms=20.0,
+            jitter_critical_ms=40.0,
+        )
+        use_case = RunFullDiagnostics(
+            ping_runner=FakePingRunner(),
+            traceroute_runner=FakeTracerouteRunner(),
+            connection_inspector=FakeConnectionInspector(),
+            repository=FakeDiagnosticsRepository(),
+            db_factory=None,
+        )
+        window = MainWindow(use_case=use_case, targets=targets, params=params)
+        try:
+            # Forzamos _last_run = None aunque el botón esté disabled por guarda.
+            window._last_run = None
+            # Llamar handler directo: debe ser no-op sin excepción.
+            window._on_click_export_markdown()
+            # Si llegamos acá, el handler no levantó excepción. OK.
+        finally:
+            window._root.destroy()
+
+    def test_handler_export_escribe_archivo_cuando_filedialog_devuelve_path(
+        self, tmp_path
+    ):
+        """Fase 12b.1: cuando el filedialog devuelve un path válido, el
+        handler renderiza el run y escribe el archivo. filedialog se mockea
+        via monkeypatch para no abrir dialog real."""
+        from gnd.application.run_full_diagnostics import (
+            DiagnosticParams,
+            DiagnosticTargets,
+            RunFullDiagnostics,
+        )
+        from gnd.domain.fakes.fake_connection_inspector import (
+            FakeConnectionInspector,
+        )
+        from gnd.domain.fakes.fake_diagnostics_repository import (
+            FakeDiagnosticsRepository,
+        )
+        from gnd.domain.fakes.fake_ping_runner import FakePingRunner
+        from gnd.domain.fakes.fake_traceroute_runner import (
+            FakeTracerouteRunner,
+        )
+        from gnd.ui.main_window import MainWindow
+
+        targets = DiagnosticTargets(
+            gateway_ip="192.168.1.1",
+            google_dns="8.8.8.8",
+            cloudflare="1.1.1.1",
+            quad9="9.9.9.9",
+            riot_public=["auth.riotgames.com"],
+            game_process_names={"League of Legends.exe"},
+        )
+        params = DiagnosticParams(
+            ping_count=4,
+            ping_timeout_ms=1000,
+            traceroute_max_hops=10,
+            traceroute_timeout_ms=1000,
+            baseline_period_days=30,
+            packet_loss_warning_pct=1.0,
+            packet_loss_critical_pct=3.0,
+            jitter_warning_ms=20.0,
+            jitter_critical_ms=40.0,
+        )
+        use_case = RunFullDiagnostics(
+            ping_runner=FakePingRunner(),
+            traceroute_runner=FakeTracerouteRunner(),
+            connection_inspector=FakeConnectionInspector(),
+            repository=FakeDiagnosticsRepository(),
+            db_factory=None,
+        )
+        window = MainWindow(use_case=use_case, targets=targets, params=params)
+        try:
+            run = use_case.execute(targets, params)
+            window._apply_run(run)
+
+            # Patch del filedialog para que devuelva un path en tmp/.
+            target_path = tmp_path / "report.md"
+            import gnd.ui.main_window as mw
+
+            original = mw.filedialog.asksaveasfilename
+
+            def _fake_dialog(**kwargs):  # noqa: ANN001, ANN202
+                return str(target_path)
+
+            mw.filedialog.asksaveasfilename = _fake_dialog  # type: ignore[attr-defined]
+            # Suppress the success messagebox (no tk display opuesto).
+            messageboxes_shown: list[str] = []
+            original_msgbox = mw.messagebox.showinfo
+
+            def _fake_showinfo(
+                title, message, **kwargs
+            ):  # noqa: ANN001, ANN001, ANN202
+                messageboxes_shown.append(f"{title}|{message}")
+
+                class _R:
+                    pass
+
+                return _R()
+
+            mw.messagebox.showinfo = _fake_showinfo  # type: ignore[attr-defined]
+            try:
+                window._on_click_export_markdown()
+            finally:
+                mw.filedialog.asksaveasfilename = original
+                mw.messagebox.showinfo = original_msgbox
+            reraise_msg = None
+            # Si excepcion, propagarla explicitamente para no enmascarar.
+
+            # Validar el archivo escrito.
+            assert target_path.exists()
+            content = target_path.read_text(encoding="utf-8")
+            assert "# GND — Reporte de diagnóstico" in content
+            assert f"`{run.run_id}`" in content
+            # Confirmation messagebox fue invocado.
+            assert any("Export" in m for m in messageboxes_shown) or reraise_msg
+        finally:
+            window._root.destroy()

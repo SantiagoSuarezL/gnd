@@ -21,13 +21,15 @@ from __future__ import annotations
 import logging
 import tkinter as tk
 from datetime import datetime
-from tkinter import ttk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 
 from gnd.application.run_full_diagnostics import (
     DiagnosticParams,
     DiagnosticTargets,
     RunFullDiagnostics,
 )
+from gnd.export import render_run_to_markdown
 from gnd.models.diagnostic_run import DiagnosticRun
 from gnd.ui.charts_section import ChartsSection
 from gnd.ui.controller import DiagnosticsController
@@ -112,6 +114,9 @@ class MainWindow:
         self._targets = targets
         self._params = params
         self._series_source = series_source
+        # Fase 12b.1: el botón "Export Markdown" se habilita solo cuando hay
+        # un run reciente disponible. None hasta el primer run exitoso.
+        self._last_run: DiagnosticRun | None = None
         self._controller = DiagnosticsController(
             use_case=use_case,
             targets=targets,
@@ -145,6 +150,17 @@ class MainWindow:
             style="Accent.TButton",
         )
         self._run_button.pack(side="right", padx=(0, 0))
+
+        # Fase 12b.1: Export Markdown de la última corrida. Disabled hasta
+        # que haya un run exitoso (handler habilita en `_apply_run`).
+        # Mismo grupo de botones que Run, a la izquierda del run_button.
+        self._export_button = ttk.Button(
+            top,
+            text="Export Markdown",
+            command=self._on_click_export_markdown,
+            state="disabled",
+        )
+        self._export_button.pack(side="right", padx=(0, 8))
 
         self._status_label = ttk.Label(top, text="Listo.", foreground=_FG_DIM)
         self._status_label.pack(side="right", padx=(0, 16))
@@ -206,6 +222,11 @@ class MainWindow:
 
     def _apply_run(self, run: DiagnosticRun) -> None:
         """Aplica el resultado del run a todas las secciones (main loop)."""
+        # Fase 12b.1: guardamos el run para que el botón "Export Markdown"
+        # pueda acceder al último sin pedirlo de nuevo al use_case.
+        self._last_run = run
+        self._export_button.configure(state="normal")
+
         # Baselines ya computados en Etapa 5 del use_case (execute()) en
         # el worker thread. Los reutilizamos aca (main loop) SIN pedir
         # una nueva conn — Regla de Oro 9.1. Antes de Fase 9 fix, esto
@@ -254,12 +275,86 @@ class MainWindow:
     def _apply_error(self, msg: str) -> None:
         self._run_button.configure(state="normal")
         self._status_label.configure(text=f"Error: {msg}")
+        # Fase 12b.1: no habilitamos export ante un run fallido — el
+        # `_last_run` queda con el anterior exitoso (o None). Si el usuario
+        # quiere exportar el último exitoso, lo puede hacer.
         # Mostrar en seccion Current Status tambien
         self._sec_current.update_state(
             {
                 "recommendation": None,
                 "_error": msg,
             }
+        )
+
+    # --- Export Markdown (Fase 12b.1) ---
+
+    def _on_click_export_markdown(self) -> None:
+        """Exporta el último run a Markdown.
+
+        Pide path al user via filedialog, llama al renderer (puro) y
+        escribe el archivo. Cualquier falla (IO, path inválido, renderer)
+        se loguea con event=export.error y se notifica via messagebox.
+        Regla 11.3: eventos export.start / export.finish / export.error
+        con `path` en extra. Regla 11.2: si `_last_run` es None (botón
+        wurde disabled pero invocado via teclado/acceso programático), es
+        no-op silencioso (omitemos el log del caso None — ruido).
+        """
+        run = self._last_run
+        if run is None:
+            # No debería ocurrir: el botón está disabled. Pero por guarda,
+            # no hacer nada (sin log — sería ruido).
+            return
+
+        # Sugerir filename con run_id + timestamp para sobre-escritura
+        # implicita entre runs del mismo día.
+        suggested = f"gnd_{run.started_at.strftime('%Y%m%d_%H%M%S')}.md"
+        path_str = filedialog.asksaveasfilename(
+            title="Exportar a Markdown",
+            defaultextension=".md",
+            initialfile=suggested,
+            filetypes=[("Markdown", "*.md"), ("Todos los archivos", "*.*")],
+        )
+        # Cancel del dialog → string vacío.
+        if not path_str:
+            return
+
+        path = Path(path_str)
+        logger.info(
+            "Export Markdown iniciado",
+            extra={"event": "export.start", "path": str(path)},
+        )
+        try:
+            content = render_run_to_markdown(run)
+            path.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            logger.exception(
+                "Export Markdown falló (IO)",
+                extra={"event": "export.error", "path": str(path)},
+            )
+            messagebox.showerror(
+                "Error al exportar",
+                f"No se pudo escribir el archivo:\n{path}\n\n{exc}",
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 — no romper la UI por un export
+            logger.exception(
+                "Export Markdown falló (renderer)",
+                extra={"event": "export.error", "path": str(path)},
+            )
+            messagebox.showerror(
+                "Error al exportar",
+                f"Error inesperado generando el reporte:\n\n{exc!r}",
+            )
+            return
+
+        logger.info(
+            "Export Markdown completado",
+            extra={"event": "export.finish", "path": str(path)},
+        )
+        self._status_label.configure(text=f"Exportado: {path.name}")
+        messagebox.showinfo(
+            "Export completado",
+            f"Reporte guardado en:\n{path}",
         )
 
     # --- Loop ---

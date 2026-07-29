@@ -363,15 +363,102 @@ Antes de cerrar 12a.4:
 Windows para hop con hostname IPv6), este item escalará a refactor del
 parser, aumentando scope. Por eso se dejó al final dentro de 12a.
 
-### Fase 12b — Comparativa, reportes y automatización (bosquejo, plan detallado al cerrar 12a)
+### Fase 12b — Comparativa, reportes y automatización
 
-Ítems candidatos (preselección, se revisa al cierre de 12a):
+Orden de implementación: un ítem por vez, cada uno con DoD propio y aprobación
+antes de pasar al siguiente (mismo molde que 12a). Decisiones tomadas al kickoff
+con el producto:
 
-- Comparación con/sin Cloudflare WARP.
-- Speed test bajo demanda (nunca automático, nunca bloqueante).
-- Notificaciones de escritorio.
-- Exportar a PDF/Markdown.
-- Reportes semanales/mensuales automáticos.
+- **Export (PDF/Markdown):** solo Markdown. PDF queda fuera (YAGNI; el usuario
+  puede "Print to PDF" desde un visor de Markdown si lo necesita; reportlab
+  ~30MB de dep nueva no se justifica para v1.1).
+- **Speed test:** `ookla-speedtest` subprocess (binario oficial en PATH, igual
+  patrón que `warp-cli` en WARP compare) + FakeSpeedTestRunner para tests.
+  Nunca automático, nunca bloqueante — botón bajo demanda.
+- **Notificaciones:** `plyer` (lib multiplataforma, abstrae toast nativos Win).
+  Suma dep al pyproject.
+- **Reportes automáticos:** reusa el renderer de Export (12b.1) para generar
+  el contenido; scheduler con `threading.Timer` integrado al controller
+  existente (YAGNI APScheduler/Celery).
+
+Ítems (sub-fases 12b.1 → 12b.5):
+
+- 12b.1 — Export Markdown
+- 12b.2 — Notificaciones de escritorio (plyer)
+- 12b.3 — Reportes semanales/mensuales automáticos (reusa 12b.1)
+- 12b.4 — Comparación con/sin Cloudflare WARP (`warp-cli` subprocess)
+- 12b.5 — Speed test bajo demanda (`ookla-speedtest` subprocess)
+
+#### 12b.1 — Export Markdown
+
+**Objetivo:** el usuario puede exportar la última corrida (`DiagnosticRun`)
+a un archivo `.md` autoexplicativo, que contenga: header con metadatos del
+run, score + veredicto + headline, explicación del motor de recomendación,
+tabla de probes (target/provider/outcome/latencias/loss/jitter/family),
+sección de traceroutes (hops por provider + culprit), secciones opcionales
+(DNS si `dns_results` no vacío, interfaz de red si `interface_snapshot` no
+None, game server activo si `active_game_server` no None).
+
+**Implementación:**
+- Paquete nuevo `src/gnd/export/`. No toca `RunFullDiagnostics` ni los
+  Protocol existentes — Export es presentation puro sobre `DiagnosticRun`
+  (modelo ya accesible en cualquier capa).
+- `export/markdown_renderer.py`: función pura
+  `render_run_to_markdown(run: DiagnosticRun) -> str`. Sin IO (file write
+  es aparte), sin dependencias nuevas (solo stdlib + `models/`). Pure
+  function testeable directamente con fakes.
+- `export/__init__.py`: re-exports el renderer.
+- UI: `MainWindow._last_run: DiagnosticRun | None` almacenado en
+  `_apply_run`. Botón "Export Markdown" en la top bar (al lado del
+  botón Run). Estado inicial `disabled`; habilitado solo si hay un run
+  reciente.
+- Click handler: si `_last_run` es None → no-op (botón ya disabled por
+  guarda). Si hay, abre `filedialog.asksaveasfilename(defaultextension=".md")`,
+  llama al renderer, escribe archivo. Errores capturados y logueados
+  (Regla 11.3: `event="export.start"` / `export.finish` / `export.error`
+  con `path` en `extra`); состояние bar actualizado con feedback.
+- No se persiste nada nuevo en la DB — el export es puramente sobre el
+  `DiagnosticRun` ya generado (la DB histórica queda intacta).
+
+**Decisiones de diseño:**
+- Renderer como **función libre**, no clase (sin estado). Justificación: no
+  hay dep externas que inyectar y el input (`DiagnosticRun`) es inmutable.
+  YAGNI un Protocol `RunRenderer` con múltiples implementaciones — solo
+  Markdown por ahora.
+- Sin stream/writer abstracto: el caller (UI) abre el path y escribe el
+  string. Mantener el renderer puramente bidimensional (in: DiagnosticRun,
+  out: str) maximiza testabilidad.
+- Botón en la top bar (no en una sección) porque export aplica a la corrida
+  entera, no a una vista particular.
+
+**Dependencias nuevas:** ninguna (stdlib `pathlib` / `tkinter.filedialog`
+en la UI, ya en stack).
+
+**Choque con protocolos:**
+- Protocolo 1 (separación `models/`/`domain/`): `export/` importa solo de
+  `models/` — no toca `psutil`/`sqlite3`/`subprocess`. OK.
+- Protocolo 6 (DI por constructor): N/A — el renderer es función libre,
+  no clase con deps.
+- Regla 11.3 (eventos estructurados): click handler emite `export.start` /
+  `export.finish` / `export.error` con `path` en `extra`.
+- Protocolo 25 (vulture): el renderer es reachable desde `MainWindow`, no
+  genera falsos positivos.
+
+**Definition of Done:**
+- Botón "Export Markdown" presente, disabled hasta que haya un run reciente.
+- Click → `asksaveasfilename` → genera `.md` válido en el path elegido.
+- El `.md` contiene: header (run_id, timestamps, duración), score + veredicto
+  + headline, explanation (lista), tabla de probes (target/provider/outcome/
+  latencias/loss/jitter/family), sección traceroutes (hops por provider +
+  culprit marcado), secciones opcionales (DNS / interfaz / game server)
+  solo si aplican.
+- Tests unitarios del renderer cubren: run mínimo, run con DNS, run con
+  interfaz Wi-Fi, run con game server, probes con todos los outcome kinds
+  (SUCCESS/FILTERED/UNREACHABLE/TIMEOUT), traceroutes con/ sin culprit.
+- Test smoke de MainWindow cubre button availability toggle (disabled sin
+  run, enabled con run) y llama al renderer con un run fake (sin interaction
+  real con filedialog — mock/stub en código o pytest fixture).
+- `ruff+black+vulture` limpio. Suite verde (596 + tests nuevos de 12b.1).
 
 Reglas transversales que aplican a toda la fase (12a y 12b):
 
