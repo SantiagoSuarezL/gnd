@@ -383,11 +383,11 @@ con el producto:
 
 Ítems (sub-fases 12b.1 → 12b.5):
 
-- 12b.1 — Export Markdown
-- 12b.2 — Notificaciones de escritorio (plyer)
-- 12b.3 — Reportes semanales/mensuales automáticos (reusa 12b.1)
-- 12b.4 — Comparación con/sin Cloudflare WARP (`warp-cli` subprocess)
-- 12b.5 — Speed test bajo demanda (`ookla-speedtest` subprocess)
+- ✅ 12b.1 — Export Markdown
+- ✅ 12b.2 — Notificaciones de escritorio (plyer)
+- [ ] 12b.3 — Reportes semanales/mensuales automáticos (reusa 12b.1)
+- [ ] 12b.4 — Comparación con/sin Cloudflare WARP (`warp-cli` subprocess)
+- [ ] 12b.5 — Speed test bajo demanda (`ookla-speedtest` subprocess)
 
 #### 12b.1 — Export Markdown
 
@@ -459,6 +459,130 @@ en la UI, ya en stack).
   run, enabled con run) y llama al renderer con un run fake (sin interaction
   real con filedialog — mock/stub en código o pytest fixture).
 - `ruff+black+vulture` limpio. Suite verde (596 + tests nuevos de 12b.1).
+
+#### 12b.2 — Notificaciones de escritorio (plyer)
+
+**Objetivo:** tras cada corrida, GND emite una notificación de escritorio
+nativa del OS (Windows toast / Linux Freedesktop / macOS NSUserNotification)
+con el veredicto + headline + score del run. Opt-in via config;
+falla del backend plyer nunca rompe la corrida/UI (EP §1.2).
+
+**Implementación:**
+- Lib nueva: `plyer>=2.1.0` en `pyproject.toml` dependencias (multiplataforma,
+  single-facade). Confirmado en runtime: `plyer 2.1.0` instala y
+  `notification.notify(title, message, app_name, timeout)` firma OK.
+- Config: nuevo sub-modelo `Notifications` en `config/__init__.py`
+  (enabled=False default YAGNI v1 / app_name="GND" / timeout_seconds=8 /
+  notify_only_on_issues=False).
+- Architecture (Clean Architecture estricta):
+  - `models/notification.py`: VO `DesktopNotification(title, message)`
+    frozen con invariantes (no vacíos). Separa "qué notificar" (formatter
+    testeable sin plyer) del "cómo" (adapter).
+  - `domain/ports/notifier.py`: Protocol `DesktopNotifier.notify(DesktopNotification)`
+    runtime_checkable.
+  - `domain/fakes/fake_notifier.py`: `FakeDesktopNotifier.notifications: list`
+    para asserts (mismo patrón que FakePingRunner.calls etc.).
+  - `notifications/plyer_notifier.py`: adapter `PlyerDesktopNotifier(app_name,
+    timeout_seconds)`. Import DEFERIDO de plyer dentro de `__init__`
+    (Protocolo 8 generalizado → Regla 12b.2.1): si plyer falta, captura
+    `ImportError`, `_available=False`, `.notify()` se vuelve no-op con log
+    `event="notification.skip"` + `reason="plyer_unavailable"`. Captura TODO
+    `Exception` del backend (`NotImplementedError` sin backend, `OSError`/
+    `RuntimeError` backends específicos) y loguea via `event="notification.error"`
+    con `error`/`exc_class` en extra (Regla 11.3).
+  - `notifications/run_formatter.py`: función pura
+    `build_run_notification(run, *, notify_only_on_issues=False) ->
+    DesktopNotification | None`. Mapea verdict → label humano ES:
+    `safe_to_play → "Listo para jugar"`, `playable → "Jugable"`,
+    `not_recommended_ranked → "No recomendado para ranked"`,
+    `serious_issue → "Problema serio"`. Title = `"GND — {label}"`;
+    message = `"{headline} (Score: {score}/100)"`. Filtrado: si
+    `notify_only_on_issues=True` y verdict=safe_to_play → devuelve None
+    (Regla 12b.2.2: omitir > toast vacía).
+- Wiring (`composition_root.py`): nueva función `build_notifier()` (mismo
+  patrón que `build_series_source()` 10 — no rompe la 3-tupla existente).
+  Lee `settings.notifications.app_name` + `timeout_seconds`, construye
+  `PlyerDesktopNotifier`. `__main__.py` actualizado para inyectar
+  `notifier=build_notifier()` + `notify_settings=settings.notifications` en
+  MainWindow.
+- UI integration (`ui/main_window.py`):
+  - `__init__` recibe `notifier: DesktopNotifier | None` y
+    `notify_settings: Notifications | None` kwargs opcionales (backwards-
+    compat: defaults None — tests existentes sin notif no crashean).
+  - `_apply_run` invoca `_maybe_send_notification(run)` al final (no
+    blocking — plyer.notify es blando <10ms, corre en main loop, no
+    worker thread).
+  - `_maybe_send_notification`: no-op si notifier/None; log
+    `notification.skip` si `enabled=False`; si formatter devuelve None
+    → log `notification.skip` con `reason="verdict_safe_filter"`; si no,
+    llama `notifier.notify(n)` envuelto en try/except (defense-in-depth
+    contra adapter buggy — el adapter ya captura, pero por si un futuro
+    adapter no respeta el contrato).
+  - No tocar `RunFullDiagnostics` (notificaciones no son etapa de
+    orquestación — son presentation pura, igual que 12b.1 Export).
+
+**Decisiones de diseño:**
+- Eventos estructurados (Regla 11.3) con namespace `notification`:
+  `notification.start` / `notification.finish` / `notification.error` /
+  `notification.skip` (skip = no emitido por filtrado, no por error).
+- Mapeo verdict → label humano para que la toast NO muestre las claves
+  internas del motor ("safe_to_play" es un key, no UX). Etiquetas ES
+  (idioma del producto).
+- Filtrado de `notify_only_on_issues` con `verdict=safe_to_play` supuesto
+  EXCELENTE. Los demás verdicts (`playable`, `not_recommended_ranked`,
+  `serious_issue`) son el "issue" que el usuario quiere ver — notifican
+  igual.
+- `build_notifier()` function separada en composition_root en vez de
+  extender la 3-tupla (`build_run_full_diagnostics`) o añadir un 4to
+  elemento — patrón ya establecido con `build_series_source()` (Fase 10).
+  No rompe callers existentes.
+
+**Dependencias nuevas:** `plyer>=2.1.0`.
+
+**Choque con protocolos:**
+- Protocolo 1 (separación `models/`/`domain/`): `notifications/` importa
+  plyer (en adapter) y de `models/` (en formatter). `models/notification.py`
+  es puro — no toca psutil/sqlite3/subprocess/plyer. El formatter solo
+  importa de `models/`. OK.
+- Protocolo 6 (DI por constructor): `PlyerDesktopNotifier(app_name, timeout)`
+  inyectado en MainWindow via kwargs. `MainWindow(notifier=..., notify_settings=...)`.
+- Protocolo 8 (import diferido y encapsulado): generalizado a toda lib
+  externa de infraestructura (Regla 12b.2.1). Plyer importado DENTRO de
+  `__init__` del adapter, no top-of-file.
+- Regla 11.3 (eventos estructurados): namespace `notification` con
+  `event=<estado>` y extras relevantes por rama. `JsonFormatter` omite None
+  (Regla 11.2).
+- Regla 9.5 (YAGNI): no pre-construir un scheduler de notificaciones
+  recurrentes (eso es 12b.3 Reportes). La notif es reactiva al evento
+  de terminar un run.
+- Protocolo 25 (vulture): todos los módulos son reachable desde
+  `composition_root` + `__main__`. Si plyer falta y adapter se vuelve
+  no-op, no es dead code (hay tests cubriendo el branch `_available=False`).
+
+**Definition of Done:**
+- `Settings.notifications.enabled` por default False; toggle via
+  config.toml o env `GND_NOTIFICATIONS__ENABLED=true`.
+- Run completo → toast nativa con título "GND — {etiqueta_verdict}" y
+  message "{headline} (Score: {score}/100)".
+- `notify_only_on_issues=True` suprime notif para `verdict=safe_to_play`
+  y NO suprime para los demás verdicts.
+- Falla de plyer (`NotImplementedError` backend ausente, `ImportError` lib
+  faltante, `OSError`/`RuntimeError` de backends) no rompe ni run ni UI
+  — logueado via `event="notification.error"` o `event="notification.skip"`.
+- Tests cubren:
+  - Formatter: 4 verdicts × 2 estados de `notify_only_on_issues`, formato
+    del title/message, boundaries de score (0, 100), VO validation.
+  - Adapter: notify exitoso (kwargs a plyer), captura NotImplementedError/
+    OSError/RuntimeError/custom Exception sin propagar, eventos start/finish/
+    error vía caplog, plyer no disponible (ImportError mockeado → no-op),
+    compliance con Protocol DesktopNotifier.
+  - Fake: acumulación, orden, compliance con Protocol.
+  - MainWindow smoke: `_apply_run` con `enabled=True` dispara 1 notif;
+    `enabled=False` no dispara; sin notifier kwarg (backwards-compat) no
+    crashea; `notifier=None` + settings seteados no crashea;
+    `notify_only_on_issues=True` suprime safe_to_play y NO suprime
+    serious_issue (probe con 15% packet_loss produce verdict != safe).
+- `ruff+black+vulture` limpio. Suite verde (641 + 46 = 687 unit + 17 deselected).
 
 Reglas transversales que aplican a toda la fase (12a y 12b):
 

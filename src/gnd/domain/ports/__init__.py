@@ -7,6 +7,7 @@ from gnd.domain.ports.ping_runner import PingRunner
 from gnd.domain.ports.recommendation_engine import RecommendationEngine
 from gnd.domain.ports.route_monitor import MonitoringRepository, RouteMonitor
 from gnd.domain.ports.traceroute_runner import TracerouteRunner
+from gnd.domain.ports.warp_controller import WarpController, WarpError, WarpStatus
 
 __all__ = [
     "ConnectionInspector",
@@ -17,4 +18,7 @@ __all__ = [
     "RecommendationEngine",
     "RouteMonitor",
     "TracerouteRunner",
+    "WarpController",
+    "WarpError",
+    "WarpStatus",
 ]

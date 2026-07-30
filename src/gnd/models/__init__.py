@@ -14,6 +14,7 @@ from gnd.models.monitoring import HopStats, MonitoringSample, MonitoringSession
 from gnd.models.probe_result import ProbeOutcomeKind, ProbeResult
 from gnd.models.recommendation import Recommendation
 from gnd.models.traceroute import TracerouteHop, TracerouteResult
+from gnd.models.warp_comparison import WarpComparisonDelta, WarpComparisonResult
 
 __all__ = [
     "ActiveGameServerInfo",
@@ -28,4 +29,6 @@ __all__ = [
     "Recommendation",
     "TracerouteHop",
     "TracerouteResult",
+    "WarpComparisonDelta",
+    "WarpComparisonResult",
 ]

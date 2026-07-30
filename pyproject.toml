@@ -10,6 +10,7 @@ dependencies = [
     "pydantic-settings>=2.0",
     "psutil>=5.9,<8",
     "matplotlib>=3.7,<4",
+    "plyer>=2.1.0",  # Fase 12b.2: notificaciones de escritorio multiplataforma
 ]
 
 [project.optional-dependencies]
@@ -125,4 +126,97 @@ ignore_names = [
     # del FakeNetworkInterfaceInspector.set_snapshot (usado en tests). ---
     "netsh_timeout_ms",
     "set_snapshot",
-]
+    # --- Fase 12b.3: APIs publicas del scheduler + fake reader usadas
+    # solo desde tests/ (vulture no escanea tests/). ``last_report_at``/
+    # ``last_report_path`` son properties pensadas para una futura status
+    # bar de UI (laguna YAGNI v1 — ver DoD 12b.3); ``tick_now`` es hook
+    # invocable programaticamente por tests o un boton "Generar ahora"
+    # futuro. Mismo patron que ``set_snapshot`` (12a.3). ---
+"add_run",
+      "last_report_at",
+      "last_report_path",
+      "tick_now",
+      # --- Fase 12b.4: config.WarpComparison.pause_between_runs_seconds
+      # leido via composition_root -> settings (mismo patron que
+      # lcu_process_names/poll_interval_seconds). FakeWarpController
+      # metodos set_* / set_fail_* son API publica para tests (vulture
+      # no escanea tests/). _connected/_registered/_warp_plus son
+      # atributos internos mutados por set_*. available es property
+      # que coincide con RealWarpController.available. ---  
+      "pause_between_runs_seconds",
+      "set_connected",
+      "set_registered",
+      "set_warp_plus",
+      "set_fail_on_enable",
+      "set_fail_on_disable",
+      "set_fail_on_status",
+      "_connected",
+      "_registered",
+      "_warp_plus",
+      "available",
+      # --- models/warp_comparison.py: dataclass fields accedidos via
+      # instancia.public_attribute (vulture no ve el patron de acceso
+      # dataclass). Methods get_provider_delta usado en tests. ---  
+      "warp_off_run_id",
+      "warp_on_run_id",
+      "get_provider_delta",
+      "status_calls",
+      "enable_calls",
+      "disable_calls",
+      # --- UI: MainWindow atributos usados en callbacks (agendados via
+      # root.after, vulture no ve el wiring). _warp_comparison y
+      # _last_warp_result son usados en _apply_warp_result /
+      # _apply_warp_error / _on_click_warp_comparison. _warp_controller_thread
+      # usado en _on_click_warp_comparison / _on_warp_progress /
+      # _on_warp_result / _on_warp_error. ---  
+      "_warp_comparison",
+      "_last_warp_result",
+      "_warp_controller_thread",
+      # --- WarpComparisonController atributos usados internamente ---
+      "_diagnostic_params",
+      # --- Fase 12b.5: config.SpeedTest.timeout_seconds leido via
+      # composition_root -> settings (mismo patron que
+      # lcu_process_names/poll_interval_seconds). FakeSpeedTestController
+      # metodos set_result / set_fail_on_run son API publica para tests
+      # (vulture no escanea tests/). available es property que coincide
+      # con RealSpeedTestController.available. ---
+      "timeout_seconds",
+      "set_result",
+      "set_fail_on_run",
+      "run_calls",
+      # --- models/speed_test.py: dataclass fields accedidos via
+      # instancia.public_attribute (vulture no ve el patron de acceso
+      # dataclass). Methods get_delta usado en tests. ---
+      "latency_ms",
+      "jitter_ms",
+      "download_mbps",
+      "upload_mbps",
+      "packet_loss_pct",
+      "server_name",
+      "server_country",
+      "isp",
+      "metric_name",
+      "baseline_value",
+      "comparison_value",
+      "delta",
+      "delta_pct",
+      "baseline",
+      "comparison",
+      "overall_verdict",
+      "verdict_explanation",
+      "baseline_duration_ms",
+      "comparison_duration_ms",
+      "speed_test_controller_available",
+      "get_delta",
+      # --- UI: MainWindow atributos usados en callbacks (agendados via
+      # root.after, vulture no ve el wiring). _speed_test_comparison y
+      # _last_speed_test_result son usados en _apply_speed_test_result /
+      # _apply_speed_test_error / _on_click_speed_test. _speed_test_controller_thread
+      # usado en _on_click_speed_test / _on_speed_test_progress /
+      # _on_speed_test_result / _on_speed_test_error. ---
+      "_speed_test_comparison",
+      "_last_speed_test_result",
+      "_speed_test_controller_thread",
+      # --- SpeedTestComparisonController atributos usados internamente ---
+      "_speed_test_params",
+  ]

@@ -149,6 +149,146 @@ class Network(BaseModel):
     netsh_timeout_ms: int = 3000
 
 
+class Notifications(BaseModel):
+    """Configuracion de notificaciones de escritorio (Fase 12b.2).
+
+    PRD §7 could-have + IMPLEMENTATION_PLAN.md 12b.2: tras cada corrida, GND
+    emite una notificacion nativa del OS (Windows toast / Linux Freedesktop /
+    macOS NSUserNotification) con el veredicto + headline del run. La
+    lib `plyer` (dependencia introducida en 12b.2) abstrae el backend
+    multiplataforma.
+
+    `enabled=False` por default (YAGNI en v1, Regla 9.5) — opt-in via
+    `GND_NOTIFICATIONS__ENABLED=true` en config.toml o env. Sensible:
+    en CI/headless no hay desktop, y no queremos toasts no solicitados
+    en el primer arranque.
+
+    `app_name`: nombre de la app mostrado por el OS en la notif (header
+    toast en Windows 10+). Default "GND".
+
+    `timeout_seconds`: cuanto tiempo (s) la toast permanece visible antes
+    de auto-cerrar. Default 8 (suficiente para leer headline + score).
+
+    `notify_only_on_issues=False`: si True, suprime las notificaciones
+    para runs con verdict "safe_to_play" (verdict EXCELENTE segun
+    nomenclatura del motor). Util si el usuario quiere ser notificado
+    solo cuando algo mueve. El usuario decide.
+    """
+
+    enabled: bool = False
+    app_name: str = "GND"
+    timeout_seconds: int = 8
+    notify_only_on_issues: bool = False
+
+
+class Reports(BaseModel):
+    """Configuracion de reportes periodicos automaticos (Fase 12b.3).
+
+    PRD §7 nice-to-have + IMPLEMENTATION_PLAN.md 12b.3: el scheduler
+    genera reportes Markdown agregando los `DiagnosticRun` persistidos
+    del ultimo periodo (semanal o mensual), reusando el renderer de
+    Export (Fase 12b.1) para los top-K runs destacados. El reporte se
+    escribe a `reports_dir` sin intervencion del usuario.
+
+    `enabled=False` por default (YAGNI en v1, Regla 9.5) — opt-in via
+    `GND_REPORTS__ENABLED=true` en config.toml o env. Sensible: la
+    feature consume un hilo daemon y escribe archivos en disco; no
+    activarla sin consentimiento explicito del usuario.
+
+    `period`: "weekly" o "monthly". String mapeado a `ReportPeriod` enum
+    en `models/report_config.py` (el wiring traduce string -> enum).
+
+    `top_runs`: cuantos runs con menor score se renderizan completos
+    (con `render_run_to_markdown` de 12b.1) dentro del reporte. Default
+    3. 0 = solo agregado + lista compacta (util para periodos largos).
+
+    `reports_dir`: directorio donde se escriben los archivos. Default
+    `%APPDATA%/GND/reports` (expandido en runtime por el writer).
+
+    `notify_on_generated=True`: emitir toast del OS (reusa 12b.2) cuando
+    un reporte se genera. Si el usuario prefiere no ver toasts por
+    reportes (los archivos estan en disco), puede desactivarlo.
+
+    `notify_only_on_clean_period=False`: si True, suprime la notif de
+    reporte cuando TODOS los runs del periodo fueron `safe_to_play`
+    (no hubo issues). Mutual con `notify_on_generated`: si este ultimo
+    es False, este flag es ignorado. Mismo filtrado que 12b.2.2 pero
+    aplicado sobre el agregado del periodo (no sobre un solo run).
+    """
+
+    enabled: bool = False
+    period: str = "weekly"  # "weekly" | "monthly" (traducido a ReportPeriod)
+    top_runs: int = 3
+    reports_dir: str = "%APPDATA%/GND/reports"
+    notify_on_generated: bool = True
+    notify_only_on_clean_period: bool = False
+
+
+class WarpComparison(BaseModel):
+    """Configuracion de la comparacion con/sin Cloudflare WARP (Fase 12b.4).
+
+    IMPLEMENTATION_PLAN.md 12b.4: ejecuta el diagnostico dos veces, una
+    con WARP activado y otra con WARP desactivado, y compara los
+    resultados para mostrar al usuario el impacto de WARP en su red.
+
+    Requiere `warp-cli` instalado y en PATH (descargable de
+    https://developers.cloudflare.com/warp/). Si no esta disponible, el
+    boton de UI se deshabilita y el caso de uso devuelve un resultado
+    con `warp_controller_available=False` (Regla 12b.2.1: import
+    diferido, el wiring nunca crashea por falta del binario).
+
+    `enabled=False` por default (YAGNI en v1, Regla 9.5) — opt-in via
+    `GND_WARP_COMPARISON__ENABLED=true`. El usuario debe haber
+    instalado warp-cli antes de habilitar esto.
+
+    `restore_original_state=True`: si WARP estaba activo antes de la
+    comparacion, se reactiva al terminar. Si False, WARP queda en el
+    estado del segundo run (warp_on). Util para tests/debug.
+
+    `timeout_seconds=30`: timeout para `warp-cli connect` (establecer
+    tunel puede tardar). `warp-cli status` usa un timeout menor (10s)
+    hardcoded en el adapter real.
+
+    `pause_between_runs_seconds=2`: pequana pausa entre los dos runs
+    para que la interfaz de red se estabilice tras un connect/disconnect.
+    """
+
+    enabled: bool = False
+    restore_original_state: bool = True
+    timeout_seconds: int = 30
+    pause_between_runs_seconds: float = 2.0
+
+
+class SpeedTest(BaseModel):
+    """Configuracion de speed test bajo demanda (Fase 12b.5).
+
+    PRD §7 could-have: ejecuta `ookla-speedtest` CLI bajo demanda y
+    muestra los resultados de ancho de banda (download/upload), latencia,
+    jitter y packet loss en una nueva pestaña UI.
+
+    Requiere `ookla-speedtest` instalado y en PATH (descargable de
+    https://www.speedtest.net/apps/cli). Si no esta disponible, el
+    boton de UI se deshabilita y el caso de uso devuelve un resultado
+    con `speed_test_controller_available=False` (Regla 12b.2.1: import
+    diferido, el wiring nunca crashea por falta del binario).
+
+    `enabled=False` por default (YAGNI en v1, Regla 9.5) — opt-in via
+    `GND_SPEED_TEST__ENABLED=true`. El usuario debe haber instalado
+    ookla-speedtest antes de habilitar esto.
+
+    `timeout_seconds=120`: timeout para `speedtest --format=json`. Un
+    speed test puede durar 30-90s; el timeout debe ser generoso para
+    redes lentas. El adapter real captura `subprocess.TimeoutExpired`
+    y lanza `SpeedTestError`.
+
+    El speed test se ejecuta DESPUES del diagnostico (no durante) para
+    no interferir con los probes (Regla de Oro 12b.5.1).
+    """
+
+    enabled: bool = False
+    timeout_seconds: int = 120
+
+
 # ---------------------------------------------------------------------------
 # Settings raiz
 # ---------------------------------------------------------------------------
@@ -163,6 +303,10 @@ class GndSettings(BaseSettings):
     logging: Logging = Logging()
     dns: Dns = Dns()
     network: Network = Network()
+    notifications: Notifications = Notifications()
+    reports: Reports = Reports()
+    warp_comparison: WarpComparison = WarpComparison()
+    speed_test: SpeedTest = SpeedTest()
 
     model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(
         env_prefix="GND_",

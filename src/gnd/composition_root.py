@@ -20,18 +20,30 @@ from gnd.application.run_full_diagnostics import (
     DiagnosticTargets,
     RunFullDiagnostics,
 )
+from gnd.application.speed_test_comparison import SpeedTestComparisonUseCase
+from gnd.application.warp_comparison import WarpComparisonUseCase
 from gnd.config import get_settings
 from gnd.database.sqlite_connection_factory import SqliteConnectionFactory
 from gnd.database.sqlite_diagnostics_repository import SqliteDiagnosticsRepository
+from gnd.database.sqlite_run_history_reader import SqliteRunHistoryReader
 from gnd.diagnostics.riot.active_game_server_detector import (
     ActiveGameServerDetector,
 )
+from gnd.domain.ports.notifier import DesktopNotifier
+from gnd.domain.ports.run_history_reader import RunHistoryReader
+from gnd.domain.ports.speed_test_controller import SpeedTestController
+from gnd.domain.ports.warp_controller import WarpController
+from gnd.models.report_config import ReportConfig, ReportPeriod
 from gnd.network.real_dns_resolver import RealDnsResolver
 from gnd.network.real_network_interface_inspector import (
     RealNetworkInterfaceInspector,
 )
 from gnd.network.real_ping_runner import RealPingRunner
+from gnd.network.real_speed_test_controller import RealSpeedTestController
 from gnd.network.real_traceroute_runner import RealTracerouteRunner
+from gnd.network.real_warp_controller import RealWarpController
+from gnd.notifications.plyer_notifier import PlyerDesktopNotifier
+from gnd.reports.scheduler import ReportsScheduler
 from gnd.visualization import SqliteSeriesDataSource
 
 logger = logging.getLogger(__name__)
@@ -72,6 +84,168 @@ def build_series_source() -> SqliteSeriesDataSource:
     db_path = _resolve_db_path(settings.database.path)
     db_factory = SqliteConnectionFactory(db_path)
     return SqliteSeriesDataSource(db_factory)
+
+
+def build_notifier() -> DesktopNotifier:
+    """Construye el DesktopNotifier para notificaciones de escritorio (Fase 12b.2).
+
+    Lee ``GndSettings.notifications`` (app_name, timeout_seconds) y construye
+    ``PlyerDesktopNotifier``. El adapter resuelve internamente si plyer esta
+    disponible; si no, ``notify()`` se vuelve no-op con log (EP §1.2 —
+    el wiring no debe crashear al arrancar por falta de plyer).
+
+    Patron separado de ``build_run_full_diagnostics`` (3-tupla) — no
+    rompe callers existentes. La MainWindow recibe el notifier como
+    kwarg opcional ``notifier`` + ``notify_settings`` (la sub-config
+    Notifications) para decidir el filtrado.
+    """
+    settings = get_settings()
+    return PlyerDesktopNotifier(
+        app_name=settings.notifications.app_name,
+        timeout_seconds=settings.notifications.timeout_seconds,
+    )
+
+
+def _period_string_to_enum(period_str: str) -> ReportPeriod:
+    """Traduce el string de config (``"weekly"``/``"monthly"``) al enum.
+
+    Fail-fast con valor claro si la config están mal — el arranque de la
+    UI no debe silenciar una config corrupta. EP §1.2 no se aplica acá
+    (no es un fallo de red en runtime, es un bug de config estática).
+    """
+    mapping = {
+        "weekly": ReportPeriod.WEEKLY,
+        "monthly": ReportPeriod.MONTHLY,
+    }
+    key = period_str.lower().strip()
+    if key not in mapping:
+        raise ValueError(
+            f"reports.period inválido: {period_str!r} "
+            "(debe ser 'weekly' o 'monthly')"
+        )
+    return mapping[key]
+
+
+def _resolve_reports_dir(path: str) -> str:
+    """Expande ``%APPDATA%`` y vars de entorno en el path de reports.
+
+    Default ``%APPDATA%/GND/reports``. Crea el directorio si no existe
+    —si falla (ej. sin permisos), loguea warning y devuelve el path
+    sin expandir; el writer real intentará crearlo de nuevo al escribir
+    el primer reporte (defensa en profundidad).
+    """
+    expanded = os.path.expandvars(path)
+    p = Path(expanded)
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "No se pudo crear el directorio de reports %s: %r. "
+            "El writer lo intentará crear de nuevo al escribir el primer "
+            "reporte.",
+            p,
+            exc,
+        )
+    return str(p)
+
+
+def build_report_pipeline() -> tuple[RunHistoryReader, ReportsScheduler]:
+    """Construye el pipeline de reportes para el scheduler (Fase 12b.3).
+
+    Reusa el path de DB de ``GndSettings.database.path`` via una
+    ``SqliteConnectionFactory`` nueva (misma DB que el writer, pero
+    conns independientes — Regla 9.1: el hilo daemon del scheduler
+    nunca comparte conn con el main loop de tkinter).
+
+    Devuelve:
+        (reader, scheduler) — el caller (MainWindow) arranca el scheduler
+        si ``settings.reports.enabled`` y lo detiene en shutdown.
+
+    Pre-condición: el caller solo arranca el scheduler si ``enabled=True``
+    en config. Si ``enabled=False``, construir el scheduler es barato
+    (no agenda nada hasta ``start()``), pero no se invoca para no tener
+    un hilo daemon zombie.
+    """
+    settings = get_settings()
+    db_path = _resolve_db_path(settings.database.path)
+    db_factory = SqliteConnectionFactory(db_path)
+    reader = SqliteRunHistoryReader(db_factory)
+
+    config = ReportConfig(
+        period=_period_string_to_enum(settings.reports.period),
+        top_runs=settings.reports.top_runs,
+        reports_dir=_resolve_reports_dir(settings.reports.reports_dir),
+        notify_on_generated=settings.reports.notify_on_generated,
+        notify_only_on_clean_period=settings.reports.notify_only_on_clean_period,
+    )
+
+    # Reusa el notifier de 12b.2 — si plyer falta, el adapter es no-op
+    # con log; el scheduler no debe crashear al arrancar por falta de
+    # lib (Protocolo 8/12b.2.1 — el notif es presentation pura post-report).
+    notifier = build_notifier()
+    scheduler = ReportsScheduler(
+        config=config,
+        reader=reader,
+        notifier=notifier,
+    )
+    return reader, scheduler
+
+
+def build_warp_controller() -> WarpController:
+    """Construye el WarpController para comparación con/sin Cloudflare
+    WARP (Fase 12b.4).
+
+    Usa ``RealWarpController`` que invoca `warp-cli` subprocess. Si el
+    binario no está en PATH, el adapter se marca ``available=False`` y
+    la UI lo refleja (botón deshabilitado, mensaje claro). EP §1.2: el
+    wiring nunca crashea al arrancar por falta de warp-cli (Regla 12b.2.1).
+    """
+    settings = get_settings()
+    return RealWarpController(timeout_seconds=settings.warp_comparison.timeout_seconds)
+
+
+def build_warp_comparison(
+    diagnostics_use_case: RunFullDiagnostics,
+    warp_controller: WarpController,
+) -> WarpComparisonUseCase:
+    """Construye el WarpComparisonUseCase para comparación WARP on/off (Fase 12b.4).
+
+    Recibe el caso de uso de diagnóstico + el WarpController ya construidos
+    (composition_root los construye una sola vez; el use case los reusa).
+    El caller decide si arranca la comparación (botón UI).
+    """
+    return WarpComparisonUseCase(
+        diagnostics_use_case=diagnostics_use_case,
+        warp_controller=warp_controller,
+    )
+
+
+def build_speed_test_controller() -> SpeedTestController:
+    """Construye el SpeedTestController para speed test bajo demanda (Fase 12b.5).
+
+    Usa ``RealSpeedTestController`` que invoca `ookla-speedtest` subprocess.
+    Si el binario no está en PATH, el adapter se marca ``available=False`` y
+    la UI lo refleja (botón deshabilitado, mensaje claro). EP §1.2: el
+    wiring nunca crashea al arrancar por falta de speedtest (Regla 12b.2.1).
+    """
+    settings = get_settings()
+    return RealSpeedTestController(timeout_s=settings.speed_test.timeout_seconds)
+
+
+def build_speed_test_comparison(
+    diagnostics_use_case: RunFullDiagnostics,
+    speed_test_controller: SpeedTestController,
+) -> SpeedTestComparisonUseCase:
+    """Construye el SpeedTestComparisonUseCase (Fase 12b.5).
+
+    Recibe el caso de uso de diagnóstico + el SpeedTestController ya
+    construidos (composition_root los construye una sola vez; el use
+    case los reusa). El caller decide si arranca el speed test (botón UI).
+    """
+    return SpeedTestComparisonUseCase(
+        diagnostics_use_case=diagnostics_use_case,
+        speed_test_controller=speed_test_controller,
+    )
 
 
 def build_run_full_diagnostics() -> (
