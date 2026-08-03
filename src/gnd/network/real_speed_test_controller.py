@@ -19,6 +19,7 @@ import subprocess
 
 from gnd.domain.ports.speed_test_controller import SpeedTestError
 from gnd.models.speed_test import SpeedTestResult
+from gnd.network._subprocess_helpers import subprocess_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,7 @@ class RealSpeedTestController:
             text=True,
             timeout=self._timeout_s,
             check=True,
+            **subprocess_kwargs(),
         )
         stdout = result.stdout.strip()
         logger.debug(

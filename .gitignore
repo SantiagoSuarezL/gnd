@@ -225,3 +225,8 @@ graphify-out/
 
 # Previews de gráficos Fase 10 (salidas PNG regenerables + sparse.db artefacto)
 phase10_charts_preview/
+
+# Archivo de debug del launcher VBS (post-Fase 14.0a): se regenera con
+# `cscript //nologo launch_gnd.vbs 2> gnd_console_debug.log` o via
+# `Start-Process ... -RedirectStandardError`. Si no existe, no afecta nada.
+gnd_console_debug.log

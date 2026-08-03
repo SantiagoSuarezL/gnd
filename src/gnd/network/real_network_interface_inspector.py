@@ -43,6 +43,7 @@ import re
 import subprocess
 
 from gnd.models.network_interface import InterfaceType, NetworkInterfaceSnapshot
+from gnd.network._subprocess_helpers import subprocess_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,7 @@ class RealNetworkInterfaceInspector:
                 text=True,
                 timeout=_DEFAULT_NETSH_TIMEOUT_MS / 1000.0,
                 check=False,
+                **subprocess_kwargs(),
             )
         except subprocess.TimeoutExpired:
             logger.warning(

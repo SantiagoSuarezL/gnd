@@ -36,6 +36,7 @@ from typing import Protocol
 
 from gnd.models.traceroute import TracerouteHop, TracerouteResult
 from gnd.network import tracert_parser
+from gnd.network._subprocess_helpers import subprocess_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +180,7 @@ class _DefaultProcessRunner:
             text=True,
             timeout=total_timeout_s,
             check=False,
+            **subprocess_kwargs(),
         )
         return (proc.stdout, proc.stderr, proc.returncode)
 
