@@ -8,6 +8,7 @@ justificación explícita (EP §1.6).
 
 from gnd.models.active_game_server import ActiveGameServerInfo
 from gnd.models.diagnostic_run import DiagnosticRun
+from gnd.models.game_endpoint import GameEndpoint
 from gnd.models.historical_baseline import HistoricalBaseline
 from gnd.models.latency_stats import LatencyStats
 from gnd.models.monitoring import HopStats, MonitoringSample, MonitoringSession
@@ -19,6 +20,7 @@ from gnd.models.warp_comparison import WarpComparisonDelta, WarpComparisonResult
 __all__ = [
     "ActiveGameServerInfo",
     "DiagnosticRun",
+    "GameEndpoint",
     "HistoricalBaseline",
     "HopStats",
     "LatencyStats",

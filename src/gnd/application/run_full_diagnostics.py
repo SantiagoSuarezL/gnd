@@ -19,6 +19,7 @@ from gnd.domain.ports.connection_inspector import ConnectionInspector
 from gnd.domain.ports.database import DatabaseConnectionFactory
 from gnd.domain.ports.diagnostics_repository import DiagnosticsRepository
 from gnd.domain.ports.dns_resolver import DnsResolver
+from gnd.domain.ports.game_diagnostics_module import GameDiagnosticsModule
 from gnd.domain.ports.network_interface_inspector import (
     NetworkInterfaceInspector,
 )
@@ -163,6 +164,17 @@ class RunFullDiagnostics:
         db_factory: DatabaseConnectionFactory | None = None,
         dns_resolver: DnsResolver | None = None,
         interface_inspector: NetworkInterfaceInspector | None = None,
+        # Fase 13.2: módulo de juego opcional. Si está presente, el
+        # orquestador consume ``module.public_endpoints()`` para las specs
+        # de Riot y ``module.process_names()`` + ``module.detect_active_server()``
+        # para la detección de partida activa — ignorando los campos
+        # Riot-hardcodeados de ``DiagnosticTargets`` (``riot_public``,
+        # ``riot_public_ipv6``, ``game_process_names``). Si es ``None``
+        # (backwards-compat con tests pre-13.2 y prod hasta 13.2b), cae al
+        # path Riot hardcodeado de hoy: usa ``connection_inspector`` +
+        # ``targets.game_process_names`` + ``targets.riot_public``. Esto
+        # permite migrar callers incrementalmente sin romper los 843 tests.
+        game_module: GameDiagnosticsModule | None = None,
     ) -> None:
         self._ping = ping_runner
         self._tracer = traceroute_runner
@@ -184,6 +196,11 @@ class RunFullDiagnostics:
         # composition_root como RealNetworkInterfaceInspector en prod,
         # FakeNetworkInterfaceInspector en tests.
         self._interface_inspector = interface_inspector
+        # Fase 13.2: módulo de juego (multi-juego). None = path Riot
+        # hardcodeado de hoy (backwards-compat). Inyectado por
+        # composition_root como LeagueOfLegendsModule en prod (Fase 13.2b),
+        # FakeGameDiagnosticsModule en tests del orquestador multi-juego.
+        self._game_module = game_module
         # Cache publica para que la UI lea baselines sin tocar DB despues
         # de execute() (evita nuevo cross-thread en root.after()). Se
         # setea en execute() al final de la Etapa 5.
@@ -277,14 +294,36 @@ class RunFullDiagnostics:
             (targets.cloudflare, "cloudflare", _PROVIDER_CLOUDFLARE, "ipv4"),
             (targets.quad9, "quad9", _PROVIDER_QUAD9, "ipv4"),
         ]
-        for host in targets.riot_public:
-            ping_specs.append(
-                (host, f"riot_public:{host}", _PROVIDER_RIOT_PUBLIC, "ipv4")
-            )
-        # Specs IPv6: solo si el usuario seteo targets.*_ipv6 en config.
-        # Duplicamos con sufijo ':v6' en target_name para distinguirlo en
-        # logs/UI sin colisionar con el proveedor (provider sigue siendo
-        # 'google' / 'cloudflare' etc. — el target_name los diferencia).
+        # Fase 13.2: specs de infraestructura del juego/publisher. Si hay
+        # ``game_module`` inyectado, los endpoints provienen de
+        # ``module.public_endpoints()`` (list[GameEndpoint] — el módulo es
+        # dueño del host + provider + family). Si no, backwards-compat:
+        # cae al path Riot hardcodeado (``targets.riot_public`` v4 +
+        # ``targets.riot_public_ipv6`` v6) — preserva el esquema de
+        # target_name ``riot_public:{host}`` (v4) y ``riot_public:{host}:v6``
+        # que analysis/UI ya dependen.
+        if self._game_module is not None:
+            for ep in self._game_module.public_endpoints():
+                suffix = ":v6" if ep.family == "ipv6" else ""
+                ping_specs.append(
+                    (
+                        ep.host,
+                        f"{ep.provider}:{ep.host}{suffix}",
+                        ep.provider,
+                        ep.family,
+                    )
+                )
+        else:
+            for host in targets.riot_public:
+                ping_specs.append(
+                    (host, f"riot_public:{host}", _PROVIDER_RIOT_PUBLIC, "ipv4")
+                )
+        # Specs IPv6 de internet health: solo si el usuario seteo
+        # targets.*_ipv6 en config (estos no son del juego, son probes de
+        # salud de Internet — google/cloudflare/quad9). Duplicamos con
+        # sufijo ':v6' en target_name para distinguirlo en logs/UI sin
+        # colisionar con el proveedor (provider sigue siendo 'google' /
+        # 'cloudflare' etc. — el target_name los diferencia).
         if targets.google_dns_ipv6 is not None:
             ping_specs.append(
                 (
@@ -305,15 +344,20 @@ class RunFullDiagnostics:
             )
         if targets.quad9_ipv6 is not None:
             ping_specs.append((targets.quad9_ipv6, "quad9:v6", _PROVIDER_QUAD9, "ipv6"))
-        for host in targets.riot_public_ipv6:
-            ping_specs.append(
-                (
-                    host,
-                    f"riot_public:{host}:v6",
-                    _PROVIDER_RIOT_PUBLIC,
-                    "ipv6",
+        # Specs v6 del juego: si no hay game_module, cae a riot_public_ipv6
+        # (backwards-compat). Si hay game_module, los endpoints v6 ya
+        # vienen incluidos en module.public_endpoints() (el módulo los
+        # construye con family='ipv6') — no duplicar.
+        if self._game_module is None:
+            for host in targets.riot_public_ipv6:
+                ping_specs.append(
+                    (
+                        host,
+                        f"riot_public:{host}:v6",
+                        _PROVIDER_RIOT_PUBLIC,
+                        "ipv6",
+                    )
                 )
-            )
 
         notify(f"Pings en paralelo: {len(ping_specs)} probes")
         log.info("stage.start pings", extra={"event": "stage.start", "stage": "pings"})
@@ -385,15 +429,31 @@ class RunFullDiagnostics:
             "stage.start detect_game_server",
             extra={"event": "stage.start", "stage": "detect_game_server"},
         )
-        active_game_server = self._safe_detect_active_server(targets.game_process_names)
+        # Fase 13.2: si hay ``game_module`` inyectado, la detección la hace
+        # el módulo (que delega a su ConnectionInspector y conoce los
+        # process_names del juego + anti-telemetría del publisher). Si no,
+        # backwards-compat: el orquestador usa su ``connection_inspector``
+        # + ``targets.game_process_names`` (path Riot hardcodeado de hoy).
+        if self._game_module is not None:
+            active_game_server = self._safe_detect_active_server_via_module(
+                self._game_module
+            )
+            # El provider del probe al server lo decide el módulo (ej.
+            # "riot_game_server" para LoL) — así no tocamos analysis.
+            game_server_provider = self._game_module.game_server_provider()
+        else:
+            active_game_server = self._safe_detect_active_server(
+                targets.game_process_names
+            )
+            game_server_provider = _PROVIDER_RIOT_GAME_SERVER
 
         if active_game_server is not None:
             notify("Riot: servidor de partida real")
             probes.append(
                 self._ping.ping(
                     target_ip=active_game_server.ip,
-                    target_name="riot_game_server",
-                    provider=_PROVIDER_RIOT_GAME_SERVER,
+                    target_name=game_server_provider,
+                    provider=game_server_provider,
                     count=params.ping_count,
                     timeout_ms=params.ping_timeout_ms,
                     family="ipv4",
@@ -414,23 +474,40 @@ class RunFullDiagnostics:
 
         # --- Etapa 4: traceroutes en paralelo ---
         # Heuristic: traceroute a cloudflare (proxy de ruta internacional)
-        # y a riot_public[0] (proxy de ruta a Riot). 2 en paralelo = ~7s
-        # vs ~14s en serie.
+        # y al primer endpoint del juego (proxy de ruta al publisher).
+        # 2 en paralelo = ~7s vs ~14s en serie.
+        # Fase 13.2: si hay game_module, el primer endpoint del juego
+        # viene de module.public_endpoints()[0] (respetando el provider
+        # del módulo — ej. "riot_public" para LoL). Si no, cae al
+        # targets.riot_public[0] hardcodeado (backwards-compat).
         # Fase 12a.4: si hay targets IPv6 seteados, duplicamos specs v6.
         traceroute_specs: list[tuple[str, str, str]] = [
             (targets.cloudflare, _PROVIDER_CLOUDFLARE, "ipv4"),
         ]
-        if targets.riot_public:
+        if self._game_module is not None:
+            game_endpoints = self._game_module.public_endpoints()
+            for ep in game_endpoints:
+                if ep.family == "ipv4":
+                    traceroute_specs.append((ep.host, ep.provider, "ipv4"))
+                    break  # solo el primer v4 del juego como proxy de ruta
+        elif targets.riot_public:
             traceroute_specs.append(
                 (targets.riot_public[0], _PROVIDER_RIOT_PUBLIC, "ipv4")
             )
         # Specs v6 (opt-in): Cloudflare DNS v6 siempre es buen proxy de
-        # ruta internacional IPv6. Riot v6 toma el primero de la lista.
+        # ruta internacional IPv6. El endpoint v6 del juego: si hay
+        # game_module viene incluido en public_endpoints (tomamos el 1er
+        # ipv6); si no, cae a targets.riot_public_ipv6[0] (backwards-compat).
         if targets.cloudflare_ipv6 is not None:
             traceroute_specs.append(
                 (targets.cloudflare_ipv6, _PROVIDER_CLOUDFLARE, "ipv6")
             )
-        if targets.riot_public_ipv6:
+        if self._game_module is not None:
+            for ep in game_endpoints:
+                if ep.family == "ipv6":
+                    traceroute_specs.append((ep.host, ep.provider, "ipv6"))
+                    break
+        elif targets.riot_public_ipv6:
             traceroute_specs.append(
                 (targets.riot_public_ipv6[0], _PROVIDER_RIOT_PUBLIC, "ipv6")
             )
@@ -646,6 +723,24 @@ class RunFullDiagnostics:
         except Exception as exc:  # noqa: BLE001
             logger.exception(
                 "ConnectionInspector fallo inesperadamente: %r -> None", exc
+            )
+            return None
+
+    def _safe_detect_active_server_via_module(
+        self, module: GameDiagnosticsModule
+    ) -> ActiveGameServerInfo | None:
+        """Wrapper defensivo sobre ``GameDiagnosticsModule.detect_active_server``.
+
+        Fase 13.2: belt-and-suspenders sobre el contrato del módulo, que
+        ya garantiza no-raise (EP §1.2). Si un módulo buggy levanta, lo
+        traducimos a ``None`` con log — la corrida continúa sin partida
+        activa (mejor que crashear la UI).
+        """
+        try:
+            return module.detect_active_server()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "GameDiagnosticsModule.detect_active_server fallo: %r -> None", exc
             )
             return None
 

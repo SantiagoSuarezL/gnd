@@ -120,6 +120,13 @@ ignore_names = [
     # (no desde nuestro codigo), vulture no los ve como callers. ---
     "process",  # RunContextAdapter.process (LoggerAdapter base contract)
     "format",  # JsonFormatter.format (Formatter base contract)
+    # --- config/__init__.py: settings_customise_sources es override de
+    # BaseSettings invocado por pydantic-settings desde su propio __init__
+    # al construir la instancia (no desde nuestro codigo). Misma regla que
+    # LoggerAdapter.process / Formatter.format (Regla 11.4). Fix Fase 13:
+    # agregar TomlConfigSettingsSource para que config.toml cargue (bug
+    # descubiero al habilitar speed_test.enabled via TOML).
+    "settings_customise_sources",
     # --- Fase 12a.3: config.Network.netsh_timeout_ms leido por
     # composition_root pero vulture no ve el wiring via settings (mismo
     # patron que lcu_process_names/poll_interval_seconds). Y API publica
@@ -150,6 +157,16 @@ ignore_names = [
       "set_fail_on_enable",
       "set_fail_on_disable",
       "set_fail_on_status",
+      "set_mode_state",
+      "set_tunnel_protocol_state",
+      "set_fail_on_set_mode",
+      "set_fail_on_set_tunnel_protocol",
+      "set_mode_calls",
+      "set_tunnel_protocol_calls",
+      "_mode",
+      "_tunnel_protocol",
+      "_fail_on_set_mode",
+      "_fail_on_set_proto",
       "_connected",
       "_registered",
       "_warp_plus",
@@ -219,4 +236,63 @@ ignore_names = [
       "_speed_test_controller_thread",
       # --- SpeedTestComparisonController atributos usados internamente ---
       "_speed_test_params",
+      # --- Fase 12b.4/12b.5: las clases UseCase + Section UI son instanciadas
+      # desde composition_root + MainWindow respectivamente (wiring DI via
+      # composition_root.py:build_speed_test_comparison() y MainWindow.__init__).
+      # Vulture no resuelve strings imports lazily factory; estos ya estaban
+      # reportados a 60% desde Fase 12b.5 original, son falsos positivos
+      # legitimos (las clases viven en application/ y ui/ y son llamadas
+      # desde afuera de esos modulos). Mismo patron que WiringController de
+      # Fase 11 (no se whitelisteo porque su scope era local; estos si
+      # ameritan porque vulture sigue reportandolos en cada cierre de fase).
+      # Ref: lessons_learned.md Regla 9.5 (vulture), 11.4 (overrides stdlib).
+      "SpeedTestComparisonUseCase",
+      "SpeedTestComparisonSection",
+      # --- Fase 13: FakeGameDiagnosticsModule metodos set_* / atributos
+      # *_calls son API publica para tests (vulture no escanea tests/).
+      # LeagueOfLegendsModule._settings accedido perezosamente via
+      # _get_settings (vulture no ve el flujo). ValorantModule
+      # _DEFAULT_VALORANT_ENDPOINTS_V4 leido solo en fallback except.
+      # models/game_endpoint.py GameEndpointVO accedido via instancia.
+      # RunFullDiagnostics._game_module usado condicionalmente en execute.
+      # build_game_module en composition_root llamado desde
+      # build_run_full_diagnostics (vulture no ve la llamada via setting
+      # de kwarg). ---
+      "set_public_endpoints",
+      "set_process_names",
+      "set_detect_result",
+      "set_game_server_provider",
+      "public_endpoints_calls",
+      "process_names_calls",
+      "detect_calls",
+      "game_server_provider_calls",
+      "_settings",
+      "_DEFAULT_VALORANT_ENDPOINTS_V4",
+      "_game_module",
+      "build_game_module",
+      # --- Fase 14.0a: LockfileReader Protocol + FakeLockfileReader API
+      # publica (set_result, read_calls) usadas solo en tests (vulture no
+      # escanea tests/). LockfileData.parse() classmethod consumido por
+      # network/lockfile_discovery.py (sub-fase 14.0b, todavia no existe)
+      # — falso positivo legitimo en 14.0a, se consumira en 14.0b.
+      # LcuClient Protocol + FakeLcuClient.set_result/get_session_calls
+      # mismo patron. GameflowSession.has_active_game_server() helper
+      # consumido por LeagueOfLegendsModule.detect_active_server en
+      # sub-fase 14.0d (no existe todavia) — falso positivo legitimo,
+      # se consumira en 14.0d. ActiveGameServerInfo.precision_tier /
+      # region_tag son defaults backwards-compat leidos por
+      # RunFullDiagnostics en sub-fase 14.0f (no existe todavia) ---
+      "LockfileReader",
+      "read",
+      "FakeLockfileReader",
+      "set_result",
+      "read_calls",
+      "parse",
+      "LcuClient",
+      "get_gameflow_session",
+      "FakeLcuClient",
+      "get_session_calls",
+      "has_active_game_server",
+      "precision_tier",
+      "region_tag",
   ]

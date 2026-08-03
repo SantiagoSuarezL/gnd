@@ -23,6 +23,9 @@ Fase 12b.4: se añade FakeWarpController para testear la comparación
 WARP on/off sin invocar warp-cli subprocess.
 Fase 12b.5: se añade FakeSpeedTestController para testear la comparación
 de speed test sin invocar speedtest subprocess.
+Fase 13.1: se añade FakeGameDiagnosticsModule para testear el orquestador
+RunFullDiagnostics con un módulo de juego programable (sin config ni
+ConnectionInspector real).
 """
 
 from gnd.domain.fakes.fake_connection_inspector import FakeConnectionInspector
@@ -31,6 +34,7 @@ from gnd.domain.fakes.fake_database_connection_factory import (
 )
 from gnd.domain.fakes.fake_diagnostics_repository import FakeDiagnosticsRepository
 from gnd.domain.fakes.fake_dns_resolver import FakeDnsResolver
+from gnd.domain.fakes.fake_game_diagnostics_module import FakeGameDiagnosticsModule
 from gnd.domain.fakes.fake_network_interface_inspector import (
     FakeNetworkInterfaceInspector,
 )
@@ -52,6 +56,7 @@ __all__ = [
     "FakeDiagnosticsRepository",
     "FakeDnsResolver",
     "FakeDesktopNotifier",
+    "FakeGameDiagnosticsModule",
     "FakeMonitoringRepository",
     "FakeNetworkInterfaceInspector",
     "FakePingRunner",

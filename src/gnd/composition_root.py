@@ -26,9 +26,13 @@ from gnd.config import get_settings
 from gnd.database.sqlite_connection_factory import SqliteConnectionFactory
 from gnd.database.sqlite_diagnostics_repository import SqliteDiagnosticsRepository
 from gnd.database.sqlite_run_history_reader import SqliteRunHistoryReader
+from gnd.diagnostics.games.league_of_legends import LeagueOfLegendsModule
+from gnd.diagnostics.games.valorant import ValorantModule
 from gnd.diagnostics.riot.active_game_server_detector import (
     ActiveGameServerDetector,
 )
+from gnd.domain.ports.connection_inspector import ConnectionInspector
+from gnd.domain.ports.game_diagnostics_module import GameDiagnosticsModule
 from gnd.domain.ports.notifier import DesktopNotifier
 from gnd.domain.ports.run_history_reader import RunHistoryReader
 from gnd.domain.ports.speed_test_controller import SpeedTestController
@@ -201,7 +205,12 @@ def build_warp_controller() -> WarpController:
     wiring nunca crashea al arrancar por falta de warp-cli (Regla 12b.2.1).
     """
     settings = get_settings()
-    return RealWarpController(timeout_seconds=settings.warp_comparison.timeout_seconds)
+    # El config expone un unico `timeout_seconds` (mando a warp-cli connect
+    # — Regla 12b.4: el adapter real tiene 3 timeouts finos pero el config
+    # solo expone el mas critico, los demas usan defaults del adapter).
+    return RealWarpController(
+        enable_timeout_s=settings.warp_comparison.timeout_seconds,
+    )
 
 
 def build_warp_comparison(
@@ -246,6 +255,49 @@ def build_speed_test_comparison(
         diagnostics_use_case=diagnostics_use_case,
         speed_test_controller=speed_test_controller,
     )
+
+
+def build_game_module(
+    connection_inspector: ConnectionInspector,
+) -> GameDiagnosticsModule:
+    """Construye el ``GameDiagnosticsModule`` según config.
+
+    Lee ``settings.game_detection.active_game`` y mapea a la
+    implementación concreta en ``diagnostics/games/``.
+
+    Fase 13.2b: mapping exhaustivo del string de config a la
+    implementación en ``diagnostics/games/``. Default
+    ``"league_of_legends"`` (backwards-compat total con runs pre-13.2).
+    Si el usuario pide un juego no reconocido, fail-fast al arrancar con
+    mensaje claro (config estática mal formada, no runtime de red — EP
+    §1.2 no aplica acá).
+
+    El ``connection_inspector`` se inyecta: el módulo LoL delega la
+    detección de partida activa al ``ActiveGameServerDetector`` que ya
+    existía (Regla 12b.2.1: import diferido de psutil vive en el
+    inspector, no en el módulo). Para juegos no-Riot con detectores
+    diferentes, cada impl decide cómo inyectar su detector.
+
+    Args:
+        connection_inspector: ``ConnectionInspector`` ya construido (ej.
+            ``ActiveGameServerDetector()``). El módulo LoL lo reusa para
+            ``detect_active_server()``.
+
+    Returns:
+        ``GameDiagnosticsModule`` concreto ( LeagueOfLegendsModule hoy;
+        ValorantModule en Fase 13.3).
+    """
+    settings = get_settings()
+    active = settings.game_detection.active_game.lower().strip()
+    if active == "league_of_legends":
+        return LeagueOfLegendsModule(connection_inspector=connection_inspector)
+    if active == "valorant":
+        return ValorantModule(connection_inspector=connection_inspector)
+    msg = (
+        f"game_detection.active_game no reconocido: {active!r}. "
+        f"Valores válidos: 'league_of_legends', 'valorant'."
+    )
+    raise ValueError(msg)
 
 
 def build_run_full_diagnostics() -> (
@@ -316,6 +368,14 @@ def build_run_full_diagnostics() -> (
         jump_threshold_ms=settings.thresholds.hop_jump_threshold_ms,
     )
     connection_inspector = ActiveGameServerDetector()
+    # Fase 13.2b: módulo de juego activo. Construido según
+    # settings.game_detection.active_game (default "league_of_legends",
+    # backwards-compat total). El módulo reusa el connection_inspector
+    # para detect_active_server() (LoL delega al ActiveGameServerDetector
+    # con su lógica anti-telemetría y process_names del config). Si config
+    # trae un valor no reconocido, build_game_module lanza fail-fast
+    # (config estática corrupta, no runtime de red).
+    game_module = build_game_module(connection_inspector)
     # Fase 12a.2: DnsResolver real, siempre construido (aun con
     # dns.enabled=False — el use case decide si la etapa corre). El
     # resolver es stateless y barato; crearlo siempre simplifica DI y
@@ -346,6 +406,7 @@ def build_run_full_diagnostics() -> (
         db_factory=db_factory,
         dns_resolver=dns_resolver,
         interface_inspector=interface_inspector,
+        game_module=game_module,
     )
 
     return use_case, targets, params

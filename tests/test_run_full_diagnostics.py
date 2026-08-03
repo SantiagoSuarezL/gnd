@@ -28,12 +28,14 @@ from gnd.application.run_full_diagnostics import (
 from gnd.domain.fakes.fake_diagnostics_repository import (
     FakeDiagnosticsRepository,
 )
+from gnd.domain.fakes.fake_game_diagnostics_module import FakeGameDiagnosticsModule
 from gnd.domain.fakes.fake_ping_runner import FakePingRunner
 from gnd.domain.fakes.fake_traceroute_runner import (
     FakeTracerouteRunner,
 )
 from gnd.logging import JsonFormatter
 from gnd.models.active_game_server import ActiveGameServerInfo
+from gnd.models.game_endpoint import GameEndpoint
 
 
 def _targets() -> DiagnosticTargets:
@@ -110,6 +112,7 @@ def _build_use_case(
     repository=None,
     db_factory=None,
     fixed_clock=None,
+    game_module=None,
 ) -> RunFullDiagnostics:
     return RunFullDiagnostics(
         ping_runner=ping_runner or FakePingRunner(),
@@ -117,6 +120,7 @@ def _build_use_case(
         connection_inspector=inspector or _InspectorStub(),
         repository=repository or _RepoSpy(),
         db_factory=db_factory,
+        game_module=game_module,
     )
 
 
@@ -362,3 +366,163 @@ class TestStructuredLoggingEvents:
             p for p in payloads if p.get("event") in ("run.start", "run.finish")
         ]
         assert all(p.get("run_id") for p in use_case_events)
+
+
+# ---------------------------------------------------------------------------
+# Fase 13.2 — orquestador consumiendo un GameDiagnosticsModule inyectado
+# ---------------------------------------------------------------------------
+
+
+class TestRunWithGameModule:
+    """Fase 13.2: cuando se inyecta un ``GameDiagnosticsModule``, el
+    orquestador consume ``module.public_endpoints()`` (specs de pings y
+    traceroutes con el provider del módulo) y
+    ``module.detect_active_server()`` (etapa 3b) +
+    ``module.game_server_provider()`` (provider del probe al server).
+    """
+
+    def _game_module(
+        self,
+        *,
+        endpoints: list[GameEndpoint] | None = None,
+        detect: ActiveGameServerInfo | None = None,
+        game_server_provider: str = "valorant_game_server",
+    ) -> FakeGameDiagnosticsModule:
+        return FakeGameDiagnosticsModule(
+            public_endpoints_result=endpoints
+            or [
+                GameEndpoint(
+                    host="valorant.secure.dyn.riotcdn.net", provider="valorant_public"
+                ),
+            ],
+            process_names_result={"VALORANT.exe"},
+            detect_result=detect,
+            game_server_provider_result=game_server_provider,
+        )
+
+    def test_specs_de_ping_usan_public_endpoints_del_modulo(self) -> None:
+        # El módulo declara un provider propio ("valorant_public") — el
+        # orquestador debe añadir probes con ESE provider, no "riot_public".
+        module = self._game_module(
+            endpoints=[
+                GameEndpoint(host="valorant.example.com", provider="valorant_public"),
+            ]
+        )
+        uc = _build_use_case(game_module=module)
+        run = uc.execute(_targets(), _params())
+        providers = {p.provider for p in run.probes}
+        assert "valorant_public" in providers
+        assert "riot_public" not in providers  # no mezcla con Riot hardcodeado
+
+    def test_specs_de_ping_con_endpoint_ipv6_lleva_sufijo_v6(self) -> None:
+        module = self._game_module(
+            endpoints=[
+                GameEndpoint(
+                    host="valorant.example.com",
+                    provider="valorant_public",
+                    family="ipv4",
+                ),
+                GameEndpoint(
+                    host="::1",
+                    provider="valorant_public",
+                    family="ipv6",
+                ),
+            ]
+        )
+        uc = _build_use_case(game_module=module)
+        run = uc.execute(_targets(), _params())
+        target_names = {p.target_name for p in run.probes}
+        # El endpoint v6 lleva sufijo ":v6" en target_name (mismo scheme pre-13).
+        assert "valorant_public:valorant.example.com" in target_names
+        assert "valorant_public:::1:v6" in target_names
+
+    def test_deteccion_de_server_delega_al_modulo(self) -> None:
+        info = ActiveGameServerInfo(
+            ip="64.7.135.10",
+            port=5000,
+            protocol="udp",
+            detected_via="process_connection_scan",
+            process_name="VALORANT.exe",
+        )
+        module = self._game_module(
+            detect=info, game_server_provider="valorant_game_server"
+        )
+        uc = _build_use_case(game_module=module)
+        run = uc.execute(_targets(), _params())
+        assert run.active_game_server is info
+        # El probe al server usa el provider del módulo, no _PROVIDER_RIOT_GAME_SERVER.
+        assert "valorant_game_server" in {p.provider for p in run.probes}
+        assert "riot_game_server" not in {p.provider for p in run.probes}
+
+    def test_sin_deteccion_del_modulo_propaga_none(self) -> None:
+        module = self._game_module(detect=None)
+        uc = _build_use_case(game_module=module)
+        run = uc.execute(_targets(), _params())
+        assert run.active_game_server is None
+        assert "valorant_game_server" not in {p.provider for p in run.probes}
+
+    def test_traceroute_usa_el_primer_endpoint_v4_del_modulo(self) -> None:
+        module = self._game_module(
+            endpoints=[
+                GameEndpoint(host="first.example.com", provider="valorant_public"),
+                GameEndpoint(host="other.example.com", provider="valorant_public"),
+            ]
+        )
+        uc = _build_use_case(game_module=module)
+        run = uc.execute(_targets(), _params())
+        traceroute_providers = {tr.target_provider for tr in run.traceroutes}
+        # cloudflare (siempre) + valorant_public (primer endpoint del módulo).
+        assert "cloudflare" in traceroute_providers
+        assert "valorant_public" in traceroute_providers
+
+    def test_traceroute_v6_usa_el_primer_endpoint_ipv6_del_modulo(self) -> None:
+        module = self._game_module(
+            endpoints=[
+                GameEndpoint(host="v4.example.com", provider="valorant_public"),
+                GameEndpoint(
+                    host="2606:4700::1", provider="valorant_public", family="ipv6"
+                ),
+            ]
+        )
+        uc = _build_use_case(game_module=module)
+        run = uc.execute(_targets(), _params())
+        v6_traceroutes = [tr for tr in run.traceroutes if tr.family == "ipv6"]
+        # el traceroute v6 del módulo se añadio (cloudflare v6 no esta configurado
+        # en _targets, así que el único v6 debe ser del módulo).
+        assert any(tr.target_provider == "valorant_public" for tr in v6_traceroutes)
+
+    def test_modulo_vacio_no_rompe_el_run(self) -> None:
+        # Módulo sin endpoints ni detección: run sigue válido, sin specs del juego.
+        module = FakeGameDiagnosticsModule()  # todo vacío
+        uc = _build_use_case(game_module=module)
+        run = uc.execute(_targets(), _params())
+        assert run.run_id
+        # Sin espec del juego: solo gateway + internet health probes.
+        game_providers = {p.provider for p in run.probes} - {
+            "local",
+            "google",
+            "cloudflare",
+            "quad9",
+        }
+        assert game_providers == set()
+
+    def test_modulo_bug_detect_lanza_se_traduce_a_none(self) -> None:
+        # Belt-and-suspenders: un módulo buggy que lanza en detect_active_server
+        # no crashea el orquestador — se traduce a None.
+
+        class _BuggyModule:
+            def public_endpoints(self) -> list[GameEndpoint]:
+                return []
+
+            def process_names(self) -> set[str]:
+                return set()
+
+            def detect_active_server(self):
+                raise RuntimeError("módulo buggy")
+
+            def game_server_provider(self) -> str:
+                return "buggy_game_server"
+
+        uc = _build_use_case(game_module=_BuggyModule())
+        run = uc.execute(_targets(), _params())
+        assert run.active_game_server is None
