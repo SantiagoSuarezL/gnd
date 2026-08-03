@@ -230,3 +230,9 @@ phase10_charts_preview/
 # `cscript //nologo launch_gnd.vbs 2> gnd_console_debug.log` o via
 # `Start-Process ... -RedirectStandardError`. Si no existe, no afecta nada.
 gnd_console_debug.log
+
+# Config personal del usuario (post-Fase 14.0a): flags de features habilitadas
+# (speed_test.enabled, warp_comparison.enabled). No se sube al repo — el
+# launcher VBS busca config.toml en CWD (config/__init__.py:354-356) y sin
+# config usa defaults; cada maquina mantiene la suya local.
+config.toml
