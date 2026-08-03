@@ -125,6 +125,16 @@ class SpeedTestComparisonResult:
     speed_test_controller_available: bool = True
     """False si RealSpeedTestController no estaba disponible."""
 
+    diagnostic_score: int | None = None
+    """Score 0-100 del diagnóstico de red corrido antes del speed test.
+    None si el resultado vino del path unavailable (no se corrió diagnóstico).
+    """
+
+    diagnostic_verdict: str | None = None
+    """Veredicto textual del diagnóstico de red (ej. 'safe_to_play', 'playable').
+    None si el resultado vino del path unavailable.
+    """
+
     def get_delta(self, metric: str) -> SpeedTestDelta | None:
         """Busca un delta específico por nombre de métrica."""
         for d in self.deltas:

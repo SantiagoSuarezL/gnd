@@ -26,12 +26,21 @@ class WarpStatus:
         registration_status: "registered" | "unregistered" | "error".
         connection_status: "connected" | "disconnected" | "connecting" | "error".
         warp_plus: True si la cuenta tiene WARP+ (mejora de routing).
+        mode: modo general del cliente ("warp" | "proxy" | "doh" | "dot" |
+            "warp+doh" | "warp+dot" | "tunnel_only"). None si no se pudo
+            detectar (Regla 12b.4.2: el adapter real parsea `warp-cli settings
+            list` línea `Mode: <x>`; si el parseo falla, None = fail-safe).
+        tunnel_protocol: protocolo del túnel ("WireGuard" | "MASQUE"). None si
+            no se pudo detectar. WireGuard = lo que el usuario llama "modo UDP"
+            en la app de Cloudflare; MASQUE = HTTP/3 (default en builds >=2024).
     """
 
     connected: bool
     registration_status: str
     connection_status: str
     warp_plus: bool
+    mode: str | None = None
+    tunnel_protocol: str | None = None
 
 
 class WarpError(Exception):
@@ -60,6 +69,11 @@ class WarpController(Protocol):
     - `enable()` / `disable()` pueden lanzar `WarpError` si el comando
       falla (timeout, warp-cli no encontrado, error de permiso). El caller
       decide cómo manejar (reintentar, loguear, notificar al usuario).
+    - `set_mode(m)` / `set_tunnel_protocol(p)` setean modo general y
+      protocolo del túnel respectivamente. Lanzan `WarpError` si fallan.
+      Usados por el use case para replicar el estado original fielmente
+      (Regla 12b.4.2: si el usuario tenía WARP en modo UDP=WireGuard, el
+      restore vuelve a WireGuard, no a MASQUE default).
     - Todos los métodos son idempotentes: llamar `enable()` con WARP ya
       activo no falla; llamar `disable()` con WARP ya apagado no falla.
     """
@@ -79,5 +93,19 @@ class WarpController(Protocol):
         """Desactiva WARP (equivalente a `warp-cli disconnect`).
 
         Devuelve el estado tras la desactivación. Lanza WarpError si falla.
+        """
+        ...
+
+    def set_mode(self, mode: str) -> None:
+        """Setea el modo general del cliente (warp/proxy/doh/...).
+
+        Lanza WarpError si el comando falla. Idempotente en CLI.
+        """
+        ...
+
+    def set_tunnel_protocol(self, protocol: str) -> None:
+        """Setea el protocolo del túnel (MASQUE | WireGuard).
+
+        Lanza WarpError si el comando falla. Idempotente en CLI.
         """
         ...

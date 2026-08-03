@@ -192,10 +192,20 @@ class SpeedTestComparisonSection(ttk.Frame):
         )
 
         # Diagnostic info (score + verdict del diagnóstico)
-        self._score_label.configure(
-            text=f"Diagnóstico: score={result.baseline.server_name}",
-            foreground=color,
-        )
+        # Bug original (Fase 12b.5): el template usaba `result.baseline.server_name`
+        # (nombre del servidor de speed test) en lugar del score del diagnóstico.
+        # El `SpeedTestComparisonResult` ahora transporta `diagnostic_score` y
+        # `diagnostic_verdict` (seteados por el use case desde `run.recommendation`).
+        diag_score = result.diagnostic_score
+        diag_verdict = result.diagnostic_verdict
+        if diag_score is not None and diag_verdict is not None:
+            self._score_label.configure(
+                text=f"Diagnóstico: score={diag_score}/100, verdict={diag_verdict}",
+                foreground=color,
+            )
+        else:
+            # Caso unavailable: no hay score del diagnóstico.
+            self._score_label.configure(text="", foreground=color)
 
         # Speed test metrics
         speed = result.comparison

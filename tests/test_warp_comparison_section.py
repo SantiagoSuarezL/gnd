@@ -6,6 +6,16 @@ Smoke tests que verifican:
 - Las secciones se agregan correctamente al MainWindow.
 - El botón WARP aparece y se habilita/deshabilita según config.
 - Backwards-compat: MainWindow sin kwargs WARP funciona igual.
+
+# FLAKYKNOWN (lesson 12b.4.2): estos tests abren `tk.Tk()` real. Bajo
+# carga (suite completa corrida desde PowerShell en Windows), `tk.Tk()`
+# ocasionalmente falla con `_tkinter.TclError: Can't find a usable
+# init.tcl` — race en el directory scan de Tcl/Tk cuando multiples tests
+# abren root en paralelo o cuando el path de tcl8.6 esta bloqueado por
+# un file handle. Pasa aislado (pytest tests/test_warp_comparison_section.py)
+# o en corridas cortas; falla ~10% de las veces en suite completa.
+# NO es bug del producto — es bug ambiental de tkinter bajo pytest en
+# Windows. Ver lessons_learned.md #12b.4.2 para workaround y detalle.
 """
 
 from __future__ import annotations

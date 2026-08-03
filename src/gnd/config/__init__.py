@@ -11,7 +11,11 @@ from typing import ClassVar
 
 try:
     from pydantic import BaseModel, Field
-    from pydantic_settings import BaseSettings, SettingsConfigDict
+    from pydantic_settings import (
+        BaseSettings,
+        SettingsConfigDict,
+        TomlConfigSettingsSource,
+    )
 except ImportError:
     msg = "pydantic[pydantic-settings] >= 2.0 es requerido. pip install -e '.[dev]'"
     raise RuntimeError(msg) from None
@@ -57,6 +61,14 @@ class GameDetection(BaseModel):
     process_names: list[str] = Field(default_factory=lambda: ["League of Legends.exe"])
     lcu_process_names: list[str] = Field(default_factory=lambda: ["LeagueClientUx.exe"])
     poll_interval_seconds: int = 5
+    # Fase 13.2b: juego activo para el que se construye el
+    # GameDiagnosticsModule. Default "league_of_legends" (backwards-compat
+    # total con runs pre-13.2). El composition_root mapea este string a
+    # la implementación concreta en diagnostics/games/. Si el usuario
+    # quiere diagnosticar Valorant, setea "valorant" (Fase 13.3). Un valor
+    # no reconocido crashea al arrancar (fail-fast en config estática, no
+    # es runtime de red) — el mapping es exhaustivo en composition_root.
+    active_game: str = "league_of_legends"
 
 
 class Thresholds(BaseModel):
@@ -315,14 +327,48 @@ class GndSettings(BaseSettings):
     )
 
     @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        # pydantic-settings v2 no carga TOML automaticamente: hay que añadir
+        # explicitamente `TomlConfigSettingsSource`. El path del toml_file se
+        # lee de `settings_cls.model_config['toml_file']` (seteado por
+        # `load()` via subclass dinamica — ver `load()` abajo).
+        # Orden de precedencia: init kwargs > .env > env vars > toml > secrets.
+        return (
+            init_settings,
+            dotenv_settings,
+            env_settings,
+            TomlConfigSettingsSource(settings_cls),
+            file_secret_settings,
+        )
+
+    @classmethod
     def load(cls, path: str | Path | None = None) -> GndSettings:
-        if path:
-            return cls(_env_file=path)
-        # busca config.toml en el directorio de trabajo
-        candidate = Path.cwd() / "config.toml"
-        if candidate.exists():
-            return cls(_env_file=str(candidate))
-        return cls()
+        if path is None:
+            # busca config.toml en el directorio de trabajo
+            candidate = Path.cwd() / "config.toml"
+            if candidate.exists():
+                path = candidate
+        if path is None:
+            return cls()
+        # pydantic-settings v2 rechaza `_toml_file=` como kwarg extra. La forma
+        # idiomatica de pasar runtime el path del toml_file es crear una
+        # subclass dinamica con el `model_config` pisado — `TomlConfigSettingsSource`
+        # lee `model_config.get('toml_file')` al instanciarse.
+        cfg = SettingsConfigDict(
+            env_prefix="GND_",
+            env_nested_delimiter="__",
+            extra="ignore",
+            toml_file=str(path),
+        )
+        Dyn = type("GndSettingsLoaded", (cls,), {"model_config": cfg})
+        return Dyn()
 
 
 # Singleton de settings (cargado una vez al arrancar, usado globalmente).

@@ -79,7 +79,7 @@ class WarpComparisonSection(ttk.Frame):
         # Provider deltas table
         self._tree = ttk.Treeview(
             self,
-            columns=("provider", "metric", "off", "on", "delta", "pct"),
+            columns=("provider", "metric", "off", "on", "delta", "pct", "status"),
             show="headings",
             height=10,
         )
@@ -90,14 +90,16 @@ class WarpComparisonSection(ttk.Frame):
             ("on", "WARP on"),
             ("delta", "Δ"),
             ("pct", "Δ%"),
+            ("status", "Status"),
         ]:
             self._tree.heading(col, text=text)
-        self._tree.column("provider", width=120, anchor="w")
-        self._tree.column("metric", width=140, anchor="w")
-        self._tree.column("off", width=90, anchor="e")
-        self._tree.column("on", width=90, anchor="e")
-        self._tree.column("delta", width=80, anchor="e")
-        self._tree.column("pct", width=70, anchor="e")
+        self._tree.column("provider", width=110, anchor="w")
+        self._tree.column("metric", width=130, anchor="w")
+        self._tree.column("off", width=80, anchor="e")
+        self._tree.column("on", width=80, anchor="e")
+        self._tree.column("delta", width=70, anchor="e")
+        self._tree.column("pct", width=60, anchor="e")
+        self._tree.column("status", width=90, anchor="center")
         self._tree.pack(side="top", fill="both", expand=True, padx=8, pady=(0, 8))
 
     def update_state(self, state: dict) -> None:
@@ -155,13 +157,19 @@ class WarpComparisonSection(ttk.Frame):
             self._clear_tree()
             return
 
-        self._status_label.configure(
-            text=(
-                f"Comparación completada ({result.warp_off_duration_ms:.0f}ms + "
-                f"{result.warp_on_duration_ms:.0f}ms)"
-            ),
-            foreground="#6a9955",
-        )
+        if result.overall_verdict == "state_timeout":
+            self._status_label.configure(
+                text="Comparación abortada: WARP no transicionó al estado objetivo",
+                foreground="#ce9178",
+            )
+        else:
+            self._status_label.configure(
+                text=(
+                    f"Comparación completada ({result.warp_off_duration_ms:.0f}ms + "
+                    f"{result.warp_on_duration_ms:.0f}ms)"
+                ),
+                foreground="#6a9955",
+            )
 
         # Verdict (color coded)
         verdict_colors = {
@@ -169,6 +177,7 @@ class WarpComparisonSection(ttk.Frame):
             "degraded": "#f48771",
             "neutral": "#dcdcaa",
             "unavailable": "#f48771",
+            "state_timeout": "#ce9178",  # Regla 12b.4.4: abort por race
         }
         color = verdict_colors.get(result.overall_verdict, "#d4d4d4")
         self._verdict_label.configure(
@@ -192,23 +201,40 @@ class WarpComparisonSection(ttk.Frame):
         )
 
         # Explanation
-        self._set_explanation("\n".join(result.verdict_explanation))
+        explanation_lines = list(result.verdict_explanation)
+        if result.restore_warning:
+            explanation_lines.append("")
+            explanation_lines.append(f"[!] {result.restore_warning}")
+        self._set_explanation("\n".join(explanation_lines))
 
         # Table
         self._clear_tree()
         for provider, deltas in result.provider_deltas.items():
             for d in deltas:
+                # Regla 12b.4.5 (bug 2 fix): valores/delta None cuando
+                # algún lado del provider falló. Mostrar "-" en vez de
+                # 0.0 o error.
+                off_str = (
+                    f"{d.warp_off_value:.1f}" if d.warp_off_value is not None else "-"
+                )
+                on_str = (
+                    f"{d.warp_on_value:.1f}" if d.warp_on_value is not None else "-"
+                )
+                delta_str = f"{d.delta:+.1f}" if d.delta is not None else "-"
                 pct = f"{d.delta_pct:+.1f}%" if d.delta_pct is not None else "-"
+                # Status: "ok" (oculto), o "FAILED" si algún lado falló.
+                status_str = "" if d.status == "ok" else "FAILED"
                 self._tree.insert(
                     "",
                     "end",
                     values=(
                         provider,
                         d.metric_name,
-                        f"{d.warp_off_value:.1f}",
-                        f"{d.warp_on_value:.1f}",
-                        f"{d.delta:+.1f}",
+                        off_str,
+                        on_str,
+                        delta_str,
                         pct,
+                        status_str,
                     ),
                 )
 

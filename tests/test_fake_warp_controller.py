@@ -149,3 +149,41 @@ class TestFakeWarpController:
         """Fake siempre está disponible (a diferencia del RealWarpController)."""
         fake = FakeWarpController()
         assert fake.available is True
+
+    # --- Regla 12b.4.2: modo/protocolo del túnel ---
+
+    def test_estado_inicial_con_mode_y_protocol(self) -> None:
+        fake = FakeWarpController(mode="warp", tunnel_protocol="WireGuard")
+        status = fake.get_status()
+        assert status.mode == "warp"
+        assert status.tunnel_protocol == "WireGuard"
+
+    def test_set_mode_registra_llamada(self) -> None:
+        fake = FakeWarpController()
+        fake.set_mode("proxy")
+        assert fake.set_mode_calls == ["proxy"]
+        assert fake.get_status().mode == "proxy"
+
+    def test_set_tunnel_protocol_registra_llamada(self) -> None:
+        fake = FakeWarpController()
+        fake.set_tunnel_protocol("MASQUE")
+        assert fake.set_tunnel_protocol_calls == ["MASQUE"]
+        assert fake.get_status().tunnel_protocol == "MASQUE"
+
+    def test_set_mode_fail_lanza_warp_error(self) -> None:
+        fake = FakeWarpController(fail_on_set_mode=True)
+        with pytest.raises(WarpError):
+            fake.set_mode("proxy")
+
+    def test_set_tunnel_protocol_fail_lanza_warp_error(self) -> None:
+        fake = FakeWarpController(fail_on_set_tunnel_protocol=True)
+        with pytest.raises(WarpError):
+            fake.set_tunnel_protocol("MASQUE")
+
+    def test_set_mode_state_helper_no_registra_call(self) -> None:
+        """set_mode_state muta el estado interno sin registrar como llamada
+        (para simular que el usuario cambió el modo a mano, no via API)."""
+        fake = FakeWarpController()
+        fake.set_mode_state("WireGuard_user_default")
+        assert fake.set_mode_calls == []
+        assert fake.get_status().mode == "WireGuard_user_default"

@@ -95,11 +95,6 @@ class SpeedTestComparisonUseCase:
         EP §1.2: nunca lanza excepción a la UI. Errores de speedtest o
         diagnóstico se loguean y se reflejan en el resultado.
         """
-        from datetime import datetime
-
-        now = clock or datetime
-        started_at = now.now()
-
         # 1. Verificar disponibilidad del speed test controller
         if not self._is_speedtest_available():
             if params.skip_if_speedtest_unavailable:
@@ -110,7 +105,7 @@ class SpeedTestComparisonUseCase:
                         "reason": "controller_unavailable",
                     },
                 )
-                return self._build_unavailable_result(started_at, now.now())
+                return self._build_unavailable_result()
             raise SpeedTestError(
                 "SpeedTest controller no disponible (speedtest no en PATH)"
             )
@@ -278,6 +273,8 @@ class SpeedTestComparisonUseCase:
             baseline_duration_ms=diag_duration_ms,
             comparison_duration_ms=speedtest_duration_ms,
             speed_test_controller_available=True,
+            diagnostic_score=run.recommendation.score,
+            diagnostic_verdict=run.recommendation.verdict,
         )
 
     def _make_delta(
@@ -306,8 +303,20 @@ class SpeedTestComparisonUseCase:
         """Determina veredicto y explicación basado en score del diagnóstico
         y métricas del speed test.
 
-        El veredicto principal viene del diagnóstico (safe_to_play, etc.).
-        El speed test aporta contexto de ancho de banda.
+        El veredicto combina dos señales independientes:
+        1. **Salud del diagnóstico** (score 0-100 + verdict textual): refleja
+           la calidad de la conexión a los proveedores de red (Google,
+           Cloudflare, Riot, etc.). Un score alto = la red está saludable.
+        2. **Deltas de latencia/jitter/loss entre gateway y speed test**: si
+           la latencia del speed test es significativamente mayor que la del
+           gateway (>5ms), indica congestión entre el usuario y el servidor
+           de speed test, aunque la red local esté saludable.
+
+        Naturaleza de las métricas (no se mezclan):
+        - Lower is better: latency_ms, jitter_ms, packet_loss_pct.
+        - Higher is better: download_mbps, upload_mbps.
+        El veredicto NO agrega download/upload (no hay baseline del diagnóstico
+        para comparar, son absolutos del speed test).
         """
         score = run.recommendation.score
         verdict = run.recommendation.verdict
@@ -324,8 +333,20 @@ class SpeedTestComparisonUseCase:
             f"latencia={speed_test_result.latency_ms:.1f}ms"
         )
 
-        # Análisis de deltas
+        # Análisis de deltas (lower is better: latency/jitter/loss).
+        # Si alguna de estas empeora, no es "improved" aunque el score sea alto.
         lat_delta = next((d for d in deltas if d.metric_name == "latency_ms"), None)
+        jitter_delta = next((d for d in deltas if d.metric_name == "jitter_ms"), None)
+        loss_delta = next(
+            (d for d in deltas if d.metric_name == "packet_loss_pct"), None
+        )
+
+        # Thresholds: deltas significativos (no ruido de medición).
+        # Latencia: >5ms diferencia. Jitter: >5ms. Loss: >0.5pp.
+        latency_worsened = lat_delta is not None and lat_delta.delta > 5.0
+        jitter_worsened = jitter_delta is not None and jitter_delta.delta > 5.0
+        loss_worsened = loss_delta is not None and loss_delta.delta > 0.5
+
         if lat_delta and abs(lat_delta.delta) > 5:
             if lat_delta.delta > 0:
                 parts.append(
@@ -338,8 +359,19 @@ class SpeedTestComparisonUseCase:
                     "menor vs gateway (ruta optimizada)"
                 )
 
-        # Veredicto agregado
-        if score >= 80:
+        if jitter_worsened:
+            parts.append(f"Jitter +{jitter_delta.delta:.1f}ms vs gateway")
+
+        if loss_worsened:
+            parts.append(f"Packet loss +{loss_delta.delta:.1f}pp vs gateway")
+
+        # Veredicto agregado: priorizar anomalías de latencia/jitter/loss
+        # sobre el score absoluto. Si las métricas de red empeoraron, el
+        # badge no puede decir "improved" sin calificar (bug original: el
+        # badge decía "IMPROVED" cuando la latencia estaba +684% peor).
+        if latency_worsened or jitter_worsened or loss_worsened:
+            overall = "degraded"
+        elif score >= 80:
             overall = "improved"
         elif score >= 60:
             overall = "neutral"
@@ -348,9 +380,7 @@ class SpeedTestComparisonUseCase:
 
         return overall, parts
 
-    def _build_unavailable_result(
-        self, started_at, finished_at
-    ) -> SpeedTestComparisonResult:
+    def _build_unavailable_result(self) -> SpeedTestComparisonResult:
         """Resultado cuando speedtest no está disponible."""
         from gnd.models.speed_test import SpeedTestResult
 

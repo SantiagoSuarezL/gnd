@@ -230,6 +230,192 @@ class TestSpeedTestComparisonUseCase:
         )
         assert result.overall_verdict == "neutral"
 
+    # ── Tests de regresión: bugs visuales reportados por el usuario ──
+
+    def test_bug1_score_alto_con_latencia_empeorada_es_degraded_no_improved(
+        self,
+    ) -> None:
+        """REGRESIÓN bug 1: badge decía "IMPROVED" cuando la latencia del
+        speed test estaba +684% peor vs gateway. La lógica vieja solo miraba
+        `score>=80` → improved, ignorando los deltas de latencia/jitter/loss.
+
+        Setup: gateway=15ms (diagnóstico OK, score=86, safe_to_play) pero
+        speed test=120ms (delta=+105, delta_pct=+700%). El badge NO debe ser
+        "improved" aunque el score del diagnóstico sea alto.
+
+        Fix: si alguna métrica de red (latency/jitter/loss) empeora
+        significativamente vs gateway, el veredicto es "degraded" sin
+        importar el score absoluto. No se permite "improved" ciego.
+        """
+        run = _make_run(
+            "r1",
+            [_probe("local", "gateway", avg_ms=15.0, jitter=2.0)],
+            score=86,
+        )
+        # Speed test: latencia +105ms vs gateway (15ms), delta_pct=+700%
+        speed_result = _speed_test_result(
+            latency_ms=120.0,  # gateway=15 → delta=+105 → empeoramiento brutal
+        )
+        speed_test = FakeSpeedTestController(result=speed_result)
+        diag = _MockDiagnostics(run)
+        use_case = SpeedTestComparisonUseCase(
+            diagnostics_use_case=diag,  # type: ignore[arg-type]
+            speed_test_controller=speed_test,
+        )
+        result = use_case.execute(
+            _make_targets(), SpeedTestComparisonParams(diagnostic_params=_make_params())
+        )
+
+        # BUG ORIGINAL: esto devolvía "improved" porque score=86>=80,
+        # ignorando que latencia empeoró +700%.
+        assert (
+            result.overall_verdict == "degraded"
+        ), f"latencia +700% no puede ser 'improved' (got {result.overall_verdict})"
+        # Verificamos que la explicación menciona la congestión
+        joined = " | ".join(result.verdict_explanation)
+        assert "latencia" in joined.lower()
+        assert "congestión" in joined.lower() or "congesti" in joined.lower()
+
+    def test_bug1_jitter_empeorado_previene_improved(
+        self,
+    ) -> None:
+        """Cobertura adicional: jitter empeorado también previene 'improved'."""
+        run = _make_run(
+            "r1",
+            [_probe("local", "gateway", avg_ms=10.0, jitter=2.0)],
+            score=92,  # score muy alto
+        )
+        # Speed test: jitter=15ms cuando gateway jitter=2ms → delta=+13ms
+        speed_result = SpeedTestResult(
+            latency_ms=10.0,
+            jitter_ms=15.0,  # gateway jitter=2 → delta=+13 → empeora
+            download_mbps=100.0,
+            upload_mbps=50.0,
+            packet_loss_pct=0.0,
+            server_name="X",
+            server_country="Y",
+            isp="Z",
+        )
+        speed_test = FakeSpeedTestController(result=speed_result)
+        diag = _MockDiagnostics(run)
+        use_case = SpeedTestComparisonUseCase(
+            diagnostics_use_case=diag,  # type: ignore[arg-type]
+            speed_test_controller=speed_test,
+        )
+        result = use_case.execute(
+            _make_targets(), SpeedTestComparisonParams(diagnostic_params=_make_params())
+        )
+
+        # score=92 (mejor que el anterior) pero jitter empeoró: degradado.
+        assert result.overall_verdict == "degraded"
+        joined = " | ".join(result.verdict_explanation)
+        assert "jitter" in joined.lower()
+
+    def test_bug1_packet_loss_empeorado_previene_improved(
+        self,
+    ) -> None:
+        """Cobertura adicional: packet loss empeorado previene 'improved'."""
+        run = _make_run(
+            "r1",
+            [
+                ProbeResult(
+                    target_name="gateway",
+                    target_ip="1.2.3.4",
+                    provider="local",
+                    outcome=ProbeOutcomeKind.SUCCESS,
+                    stats=LatencyStats(
+                        avg_ms=10.0,
+                        min_ms=9.0,
+                        max_ms=11.0,
+                        jitter_ms=1.0,
+                        packet_loss_pct=0.0,
+                        samples=10,
+                    ),
+                    timestamp=datetime(2026, 1, 1),
+                )
+            ],
+            score=95,
+        )
+        speed_result = SpeedTestResult(
+            latency_ms=10.0,
+            jitter_ms=1.0,
+            download_mbps=100.0,
+            upload_mbps=50.0,
+            packet_loss_pct=2.5,  # gateway=0 → delta=+2.5pp → empeora
+            server_name="X",
+            server_country="Y",
+            isp="Z",
+        )
+        speed_test = FakeSpeedTestController(result=speed_result)
+        diag = _MockDiagnostics(run)
+        use_case = SpeedTestComparisonUseCase(
+            diagnostics_use_case=diag,  # type: ignore[arg-type]
+            speed_test_controller=speed_test,
+        )
+        result = use_case.execute(
+            _make_targets(), SpeedTestComparisonParams(diagnostic_params=_make_params())
+        )
+
+        assert result.overall_verdict == "degraded"
+        joined = " | ".join(result.verdict_explanation)
+        assert "loss" in joined.lower() or "packet" in joined.lower()
+
+    def test_bug2_diagnostic_score_y_verdict_se_transportan_en_el_resultado(
+        self,
+    ) -> None:
+        """REGRESIÓN bug 2: el template de la UI usaba `baseline.server_name`
+        (nombre del servidor de speed test) donde debería ir el score numérico
+        del diagnóstico. El `SpeedTestComparisonResult` ahora transporta
+        `diagnostic_score` y `diagnostic_verdict` (seteados por el use case
+        desde `run.recommendation`), así la UI puede mostrar
+        `Diagnóstico: score=86/100, verdict=safe_to_play` en lugar de
+        `score=Movistar`.
+
+        Este test valida que el use case SI los transporta en el resultado
+        (el test del template roto está en la section, ver
+        `test_bug2_score_label_muestra_score_no_server_name`).
+        """
+        run = _make_run(
+            "r1",
+            [_probe("local", "gateway", avg_ms=15.0)],
+            score=86,
+        )
+        # forzamos verdict distinto a default
+        assert run.recommendation.verdict == "safe_to_play"  # score=86>=80
+
+        speed_test = FakeSpeedTestController(result=_speed_test_result())
+        diag = _MockDiagnostics(run)
+        use_case = SpeedTestComparisonUseCase(
+            diagnostics_use_case=diag,  # type: ignore[arg-type]
+            speed_test_controller=speed_test,
+        )
+        result = use_case.execute(
+            _make_targets(), SpeedTestComparisonParams(diagnostic_params=_make_params())
+        )
+
+        assert result.diagnostic_score == 86
+        assert result.diagnostic_verdict == "safe_to_play"
+
+    def test_bug2_unavailable_path_no_pone_score_ni_verdict(
+        self,
+    ) -> None:
+        """Caso unavailable: el resultado NO trae score/verdict del
+        diagnóstico (no se corrió). Los campos deben ser None.
+        """
+        speed_test = FakeSpeedTestController(available=False)
+        diag = _MockDiagnostics(_make_run("r1", [], 80))
+        use_case = SpeedTestComparisonUseCase(
+            diagnostics_use_case=diag,  # type: ignore[arg-type]
+            speed_test_controller=speed_test,
+        )
+        params = SpeedTestComparisonParams(
+            diagnostic_params=_make_params(),
+            skip_if_speedtest_unavailable=True,
+        )
+        result = use_case.execute(_make_targets(), params)
+        assert result.diagnostic_score is None
+        assert result.diagnostic_verdict is None
+
     def test_speedtest_se_ejecuta_despues_del_diagnostico(self) -> None:
         """El speed test debe ejecutarse después del diagnóstico."""
         run = _make_run("r1", [_probe("local", "gateway", 15.0)], score=85)
