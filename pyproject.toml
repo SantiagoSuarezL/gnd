@@ -20,6 +20,7 @@ dev = [
     "ruff>=0.5",
     "black>=24.0",
     "vulture>=2.16",
+    "pip-audit>=2.7",  # auditoria de CVEs en deps (ver scripts/check.ps1)
 ]
 
 [build-system]

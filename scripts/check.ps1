@@ -2,7 +2,7 @@
 # Ejecutar desde la raiz del proyecto con el entorno virtual (.venv) activado:
 #     .\.venv\Scripts\Activate.ps1
 #     .\scripts\check.ps1
-# Corre ruff, vulture, black y pytest en un solo comando.
+# Corre ruff, vulture, black, pytest y pip-audit en un solo comando.
 # Detiene la ejecucion en el primer error (via exit codes explicitos).
 #
 # Problema resuelto: PowerShell 5.1 convierte stderr de nativos
@@ -49,4 +49,13 @@ if ($rc -ne 0) { Write-Host "FAIL: black rc=$rc" -ForegroundColor Red; exit $rc 
 $rc = Check-Step "pytest" "python -m pytest -q"
 if ($rc -ne 0) { Write-Host "FAIL: pytest rc=$rc" -ForegroundColor Red; exit $rc }
 
-Write-Host "OK: ruff, vulture, black y pytest pasaron sin errores." -ForegroundColor Green
+# pip-audit consulta la base publica de CVEs de paquetes Python (PyPA/OSV).
+# Exit code 0 = sin vulnerabilidades conocidas; 1 = hay vulnerabilidades;
+# 2 = fallo de ejecucion (p.ej. sin red o sin index alcanzable).
+$rc = Check-Step "pip-audit" "python -m pip_audit"
+if ($rc -ne 0) {
+    Write-Host "FAIL: pip-audit rc=$rc (CVE conocidos en dependencias o `nfallo al consultar la base de vulnerabilidades). Actualizar deps o revisar red." -ForegroundColor Red
+    exit $rc
+}
+
+Write-Host "OK: ruff, vulture, black, pytest y pip-audit pasaron sin errores." -ForegroundColor Green
