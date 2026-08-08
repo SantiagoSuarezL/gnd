@@ -9,9 +9,10 @@ Y verifica que el DiagnosticRun final refleje esas anomalías en su
 Recommendation, no solo en Historical Comparison.
 
 USO:
-    python scripts/verify_phase9_fix.py                    # DB temporal en /tmp (no toca producción)
-    python scripts/verify_phase9_fix.py --db-path ruta.db  # DB personalizada
+    python scripts/verify_phase9_fix.py  # DB temporal en /tmp (no toca producción)
+    python scripts/verify_phase9_fix.py --db-path runta.db  # DB personalizada
 """
+
 import argparse
 import os
 import tempfile
@@ -51,7 +52,9 @@ def _probe(
 def build_use_case_with_db(db_path: str):
     """Construye RunFullDiagnostics con una DB específica (no producción)."""
     from gnd.config import get_settings
-    from gnd.diagnostics.riot.active_game_server_detector import ActiveGameServerDetector
+    from gnd.diagnostics.riot.active_game_server_detector import (
+        ActiveGameServerDetector,
+    )
     from gnd.network.real_ping_runner import RealPingRunner
     from gnd.network.real_traceroute_runner import RealTracerouteRunner
 
@@ -99,7 +102,9 @@ def main(db_path: str | None = None) -> bool:
 
     # Resolver DB path: si no se pasa, usar temporal en directorio temp del sistema
     if db_path is None:
-        db_path = os.path.join(tempfile.gettempdir(), f"gnd_verify_phase9_{os.getpid()}.db")
+        db_path = os.path.join(
+            tempfile.gettempdir(), f"gnd_verify_phase9_{os.getpid()}.db"
+        )
         print(f"\n[INFO] Usando DB temporal: {db_path}")
     else:
         print(f"\n[INFO] Usando DB especificada: {db_path}")
@@ -120,21 +125,29 @@ def main(db_path: str | None = None) -> bool:
             _probe("quad9", 12.6, 0.0, 0.5),
             _probe("riot_public", 20.0, 0.0, 2.0),
         ]
-        run = type("Run", (), {
-            "run_id": f"hist-{i:03d}",
-            "started_at": ts,
-            "finished_at": ts,
-            "probes": probes,
-            "traceroutes": [],
-            "active_game_server": None,
-            "recommendation": type("Rec", (), {
-                "verdict": "safe_to_play",
-                "headline": " conexion estable",
-                "explanation": ["OK"],
-                "responsible_component": "unknown",
-                "score": 95,
-            })(),
-        })()
+        run = type(
+            "Run",
+            (),
+            {
+                "run_id": f"hist-{i:03d}",
+                "started_at": ts,
+                "finished_at": ts,
+                "probes": probes,
+                "traceroutes": [],
+                "active_game_server": None,
+                "recommendation": type(
+                    "Rec",
+                    (),
+                    {
+                        "verdict": "safe_to_play",
+                        "headline": " conexion estable",
+                        "explanation": ["OK"],
+                        "responsible_component": "unknown",
+                        "score": 95,
+                    },
+                )(),
+            },
+        )()
         repo.save_run(run)
     print("    -> 30 corridas historicas insertadas")
 
@@ -163,9 +176,9 @@ def main(db_path: str | None = None) -> bool:
     # Monkey-patch del ping_runner para devolver nuestros probes anómalos
     anomaly_probes = [
         _probe("local", 5.0),
-        _probe("google", 18.8),       # ANÓMALO: baseline 13.3 + 2*0.5 = 14.3
-        _probe("cloudflare", 12.0),    # OK
-        _probe("quad9", 17.8),         # ANÓMALO: baseline 12.6 + 2*0.5 = 13.6
+        _probe("google", 18.8),  # ANÓMALO: baseline 13.3 + 2*0.5 = 14.3
+        _probe("cloudflare", 12.0),  # OK
+        _probe("quad9", 17.8),  # ANÓMALO: baseline 12.6 + 2*0.5 = 13.6
         _probe("riot_public", 20.0),
     ]
 
@@ -181,11 +194,15 @@ def main(db_path: str | None = None) -> bool:
     use_case._ping.ping = fake_ping
 
     # También monkey-patch traceroute y inspector (no críticos para este test)
-    use_case._tracer.traceroute = lambda *a, **kw: type("TR", (), {
-        "target_provider": kw.get("target_provider", "cloudflare"),
-        "hops": [],
-        "culprit_hop_index": None,
-    })()
+    use_case._tracer.traceroute = lambda *a, **kw: type(
+        "TR",
+        (),
+        {
+            "target_provider": kw.get("target_provider", "cloudflare"),
+            "hops": [],
+            "culprit_hop_index": None,
+        },
+    )()
     use_case._inspector.detect_active_game_server = lambda *a, **kw: None
 
     run = use_case.execute(targets, params)
@@ -240,7 +257,7 @@ def main(db_path: str | None = None) -> bool:
     else:
         print("[PASS] Sin texto contradictorio 'normales/seguro'")
 
-# Responsable debe ser 'isp' (heurística: anomalías solo en Internet externo)
+    # Responsable debe ser 'isp' (heurística: anomalías solo en Internet externo)
     if rec.responsible_component != "isp":
         comp = rec.responsible_component
         msg = f"[INFO] responsible_component='{comp}' (esperado 'isp')"

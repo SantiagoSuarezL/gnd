@@ -2,7 +2,7 @@
 
 Script SOLO LECTURA — verifica que el adapter real de WARP parsea
 correctamente el estado actual de tu `warp-cli` (versión 2026.6.850.0) sin
-mutar WARP (no prende/apaga/changed mode). 
+mutar WARP (no prende/apaga/changed mode).
 
 QUÉ PRUEBA:
 1. `shutil.which("warp-cli")` encuentra el binario en tu PATH.
@@ -44,7 +44,7 @@ def main() -> int:
         print("       terminal si lo acabás de instalar).")
         return 1
 
-    print(f"\n[OK] warp-cli encontrado.")
+    print("\n[OK] warp-cli encontrado.")
 
     print("\n--- get_status() ---")
     status = ctrl.get_status()
@@ -54,7 +54,10 @@ def main() -> int:
     print(f"  registration      = {status.registration_status!r}")
     print(f"  warp_plus         = {status.warp_plus}")
     print(f"  mode              = {status.mode!r}   (ej: 'warp', 'proxy', 'doh')")
-    print(f"  tunnel_protocol   = {status.tunnel_protocol!r}   (ej: 'WireGuard'=UDP, 'MASQUE')")
+    print(
+        f"  tunnel_protocol   = {status.tunnel_protocol!r}   "
+        f"(ej: 'WireGuard'=UDP, 'MASQUE')"
+    )
 
     print("\n--- Interpretación ---")
     if status.connection_status == "error":
